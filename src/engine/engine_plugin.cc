@@ -20,17 +20,13 @@
 
 #include "engine/engine_plugin.h"
 
-#include <atomic>
-#include <cstddef>
-#include <cstdlib>
+#include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <new>
-#include <shared_mutex>
-#include <type_traits>
-#include <utility>
-#include <vector>
+#include <string>
+#include <string_view>
 
 extern "C" {
 #if defined(_WIN32) || defined(__CYGWIN__)
@@ -41,14 +37,8 @@ extern "C" {
 #endif
 }
 
-#ifdef __APPLE__
-#include <Availability.h>
-#if !defined(MAC_OS_X_VERSION_MIN_REQUIRED) && defined(__MAC_OS_X_VERSION_MIN_REQUIRED)
-#define MAC_OS_X_VERSION_MIN_REQUIRED __MAC_OS_X_VERSION_MIN_REQUIRED
-#endif
-#endif
-
 #include <mujoco/mjplugin.h>
+#include "engine/engine_global_table.h"
 #include "engine/engine_util_errmem.h"
 
 // set default plugin definition
@@ -57,100 +47,13 @@ void mjp_defaultPlugin(mjpPlugin* plugin) {
 }
 
 namespace {
+using mujoco::GlobalTable;
+
 constexpr int kMaxNameLength = 1024;
 constexpr int kMaxAttributes = 255;
 
-constexpr int kCacheLine = 64;
-
-// A table of registered plugins, implemented as a linked list of array "blocks".
-// This is a compromise that maintains a good degree of memory locality while not invalidating
-// existing pointers when growing the table. It is expected that for most users, the number of
-// plugins loaded into a program will be small enough to fit in the initial block, and so the global
-// table will behave like an array. Since pointers are never invalidated, we do not need to apply a
-// read lock on the global table when resolving a plugin.
-struct alignas(kCacheLine) PluginTable {
-  static constexpr int kBlockSize = 15;
-
-  PluginTable() {
-    for (int i = 0; i < kBlockSize; ++i) {
-      mjp_defaultPlugin(&plugins[i]);
-    }
-  }
-
-  mjpPlugin plugins[kBlockSize];
-  PluginTable* next = nullptr;
-};
-
-static_assert(
-    sizeof(PluginTable) / kCacheLine ==
-    sizeof(PluginTable::plugins) / kCacheLine + (sizeof(PluginTable::plugins) % kCacheLine > 0),
-    "PluginTable::next doesn't fit in the same cache line as the end of PluginTable::plugins");
-
-using Mutex = std::shared_mutex;
-
-class ReentrantWriteLock {
- public:
-  ReentrantWriteLock(Mutex& mutex) : mutex_(mutex) {
-    if (LockCountOnCurrentThread() == 0) {
-      mutex_.lock();
-    }
-    ++LockCountOnCurrentThread();
-  }
-
-  ~ReentrantWriteLock() {
-    if (--LockCountOnCurrentThread() == 0) {
-      mutex_.unlock();
-    }
-  }
-
- private:
-  Mutex& mutex_;
-
-  static int& LockCountOnCurrentThread() noexcept {
-    thread_local int counter = 0;
-    return counter;
-  }
-};
-
-class Global {
- public:
-  Global() {
-    new(mutex_) Mutex;
-  }
-  PluginTable& table() {
-    return table_;
-  }
-  std::atomic_int& count() {
-    return count_;
-  }
-  Mutex& mutex() {
-    return *std::launder(reinterpret_cast<Mutex*>(&mutex_));
-  }
-
-  ReentrantWriteLock lock_mutex_exclusively() {
-    return ReentrantWriteLock(mutex());
-  }
-
- private:
-  PluginTable table_;
-  std::atomic_int count_;
-
-  // A mutex whose destructor is never run.
-  // When a C++ program terminates, the destructors for function static objects and globals will be
-  // executed by whichever thread started that termination but there is no guarantee that other
-  // threads have terminated. In other words, a static object may be accessed by another thread
-  // after it is deleted. We avoid destruction issues by never running the destructor.
-  alignas(Mutex) unsigned char mutex_[sizeof(Mutex)];
-};
-
-Global& GetGlobal() {
-  static Global global;
-  static_assert(std::is_trivially_destructible_v<decltype(global)>);
-  return global;
-}
-
 // return the length of a null-terminated string, or -1 if it is not terminated after kMaxNameLength
-int strnlen(const char* s) {
+int strklen(const char* s) {
   for (int i = 0; i < kMaxNameLength; ++i) {
     if (!s[i]) {
       return i;
@@ -161,7 +64,7 @@ int strnlen(const char* s) {
 
 // copy a null-terminated string into a new heap-allocated char array managed by a unique_ptr
 std::unique_ptr<char[]> CopyName(const char* s) {
-  int len = strnlen(s);
+  int len = strklen(s);
   if (len == -1) {
     return nullptr;
   }
@@ -174,8 +77,58 @@ std::unique_ptr<char[]> CopyName(const char* s) {
   return out;
 }
 
+// check if prefix is a valid URI scheme format
+bool IsValidURISchemeFormat(const char* prefix) {
+  int len;
+
+  // prefix is NULL or empty
+  if (prefix == nullptr || !(len = std::strlen(prefix))) {
+    return false;
+  }
+
+  // first character must be a letter
+  if (!std::isalpha(prefix[0])) {
+    return false;
+  }
+
+  for (int i = 1; i < len; i++) {
+    // each following character must be a letter, digit, '+', '.', or '-'
+    if (!std::isalnum(prefix[i]) &&
+        (prefix[i] != '+') &&
+        (prefix[i] != '.') &&
+        (prefix[i] != '-')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// seek the nth config attrib of a plugin instance by counting null terminators
+const char* PluginAttrSeek(const mjModel* m, int plugin_id, int attrib_id) {
+  const char* ptr = m->plugin_attr + m->plugin_attradr[plugin_id];
+  for (int i = 0; i < attrib_id; ++i) {
+    while (*ptr) {
+      ++ptr;
+    }
+    ++ptr;
+  }
+  return ptr;
+}
+}  // namespace
+
+template <>
+const char* GlobalTable<mjpPlugin>::HumanReadableTypeName() {
+  return "plugin";
+}
+
+template <>
+std::string_view GlobalTable<mjpPlugin>::ObjectKey(const mjpPlugin& plugin) {
+  return std::string_view(plugin.name, strklen(plugin.name));
+}
+
 // check if two plugins are identical
-bool PluginsAreIdentical(const mjpPlugin& plugin1, const mjpPlugin& plugin2) {
+template <>
+bool GlobalTable<mjpPlugin>::ObjectEqual(const mjpPlugin& plugin1, const mjpPlugin& plugin2) {
   if (plugin1.name && !plugin2.name) {
     return false;
   }
@@ -194,7 +147,7 @@ bool PluginsAreIdentical(const mjpPlugin& plugin1, const mjpPlugin& plugin2) {
     if (plugin1.attributes[i] && !plugin2.attributes[i]) {
       return false;
     }
-    if (plugin2.attributes[i] && !plugin1.attributes[i]) {
+    if (plugin1.attributes[i] && !plugin2.attributes[i]) {
       return false;
     }
     if (plugin1.attributes[i] && plugin2.attributes[i] &&
@@ -212,7 +165,105 @@ bool PluginsAreIdentical(const mjpPlugin& plugin1, const mjpPlugin& plugin2) {
       sizeof(mjpPlugin) - (ptr1 - reinterpret_cast<const char*>(&plugin1));
   return !std::memcmp(ptr1, ptr2, remaining_size);
 }
-}  // namespace
+
+template <>
+bool GlobalTable<mjpPlugin>::CopyObject(mjpPlugin& dst, const mjpPlugin& src, ErrorMessage& err) {
+  // check and copy the plugin name
+  std::unique_ptr<char[]> name = CopyName(src.name);
+  if (!name) {
+    if (strklen(src.name) == -1) {
+      std::snprintf(err, sizeof(err),
+                    "plugin->name length exceeds the maximum limit of %d", kMaxNameLength);
+    } else {
+      std::snprintf(err, sizeof(err), "failed to allocate memory for plugin name");
+    }
+    return false;
+  }
+
+  // check and copy plugin attributes
+  std::unique_ptr<std::unique_ptr<char[]>[]> attributes_list;
+  if (src.nattribute) {
+    attributes_list.reset(new(std::nothrow) std::unique_ptr<char[]>[src.nattribute]);
+    if (!attributes_list) {
+      std::snprintf(err, sizeof(err), "failed to allocate memory for plugin attribute list");
+      return false;
+    }
+    for (int i = 0; i < src.nattribute; ++i) {
+      std::unique_ptr<char[]> attr = CopyName(src.attributes[i]);
+      if (!attr) {
+        if (strklen(src.attributes[i]) == -1) {
+          std::snprintf(
+              err, sizeof(err),
+              "length of plugin attribute %d exceeds the maximum limit of %d", i, kMaxAttributes);
+        } else {
+          std::snprintf(err, sizeof(err), "failed to allocate memory for plugin attribute %d", i);
+        }
+        return false;
+      }
+      attributes_list[i].swap(attr);
+    }
+  }
+
+  // release the attribute names from unique_ptr into a plain array
+  const char** attributes = nullptr;
+  if (src.nattribute) {
+    attributes = new(std::nothrow) const char*[src.nattribute];
+    if (!attributes) {
+      std::snprintf(err, sizeof(err), "failed to allocate memory for plugin attribute array");
+      return -1;
+    }
+    for (int i = 0; i < src.nattribute; ++i) {
+      attributes[i] = attributes_list[i].release();
+    }
+  }
+
+  dst = src;
+  dst.name = name.release();
+  dst.attributes = attributes;
+
+  return true;
+}
+
+template <>
+const char* GlobalTable<mjpResourceProvider>::HumanReadableTypeName() {
+  return "resource provider";
+}
+
+template <>
+std::string_view GlobalTable<mjpResourceProvider>::ObjectKey(const mjpResourceProvider& plugin) {
+  return std::string_view(plugin.prefix, strklen(plugin.prefix));
+}
+
+// check if two resource providers are identical
+template <>
+bool GlobalTable<mjpResourceProvider>::ObjectEqual(const mjpResourceProvider& p1, const mjpResourceProvider& p2) {
+  return (CaseInsensitiveEqual(p1.prefix, p2.prefix) &&
+          p1.open == p2.open &&
+          p1.read == p2.read &&
+          p1.close == p2.close &&
+          p1.getdir == p2.getdir &&
+          p1.modified == p2.modified &&
+          p1.data == p2.data);
+}
+
+template <>
+bool GlobalTable<mjpResourceProvider>::CopyObject(mjpResourceProvider& dst, const mjpResourceProvider& src, ErrorMessage& err) {
+  // copy prefix
+  std::unique_ptr<char[]> prefix = CopyName(src.prefix);
+  if (!prefix) {
+    if (strklen(src.prefix) == -1) {
+      std::snprintf(err, sizeof(err),
+                    "provider->prefix length exceeds the maximum limit of %d", kMaxNameLength);
+    } else {
+      std::snprintf(err, sizeof(err), "failed to allocate memory for resource provider prefix");
+    }
+    return false;
+  }
+
+  dst = src;
+  dst.prefix = prefix.release();
+  return true;
+}
 
 // globally register a plugin (thread-safe), return new slot id
 int mjp_registerPlugin(const mjpPlugin* plugin) {
@@ -227,223 +278,33 @@ int mjp_registerPlugin(const mjpPlugin* plugin) {
               kMaxAttributes);
   }
 
-  char err[512];
-  err[0] = '\0';
-
-  // ========= ATTENTION! ==========================================================================
-  // Do not handle objects with nontrivial destructors outside of this lambda.
-  // Do not call mju_error inside this lambda.
-  int slot = [&]() -> int {
-    // check and copy the plugin name
-    std::unique_ptr<char[]> name = CopyName(plugin->name);
-    if (!name) {
-      if (strnlen(plugin->name) == -1) {
-        std::snprintf(err, sizeof(err),
-                      "plugin->name length exceeds the maximum limit of %d", kMaxNameLength);
-      } else {
-        std::snprintf(err, sizeof(err), "failed to allocate memory for plugin name");
-      }
-      return -1;
-    }
-
-    // check and copy plugin attributes
-    std::vector<std::unique_ptr<char[]>> attributes_vec;
-    if (plugin->nattribute) {
-      attributes_vec.reserve(plugin->nattribute);
-      for (int i = 0; i < plugin->nattribute; ++i) {
-        std::unique_ptr<char[]> attr = CopyName(plugin->attributes[i]);
-        if (!attr) {
-          if (strnlen(plugin->attributes[i]) == -1) {
-            std::snprintf(
-                err, sizeof(err),
-                "plugin->attributes[%d] exceeds the maximum limit of %d", i, kMaxAttributes);
-          } else {
-            std::snprintf(err, sizeof(err), "failed to allocate memory for plugin attribute");
-          }
-          return -1;
-        }
-        attributes_vec.emplace_back(std::move(attr));
-      }
-    }
-
-    Global& global = GetGlobal();
-    auto lock = global.lock_mutex_exclusively();
-
-    int count = global.count().load(std::memory_order_acquire);
-    int local_idx = 0;
-    PluginTable* table = &global.table();
-
-    // check if a non-identical plugin with the same name has already been registered
-    for (int i = 0; i < count; ++i, ++local_idx) {
-      if (local_idx == PluginTable::kBlockSize) {
-        local_idx = 0;
-        table = table->next;
-      }
-      mjpPlugin& existing = table->plugins[local_idx];
-      if (std::strcmp(plugin->name, existing.name) == 0) {
-        if (PluginsAreIdentical(*plugin, existing)) {
-          return i;
-        } else {
-          std::snprintf(err, sizeof(err), "plugin '%s' is already registered", plugin->name);
-          return -1;
-        }
-      }
-    }
-
-    // allocate a new block of PluginTable if the last allocated block is full
-    if (local_idx == PluginTable::kBlockSize) {
-      local_idx = 0;
-#if defined(MAC_OS_X_VERSION_MIN_REQUIRED) && MAC_OS_X_VERSION_MIN_REQUIRED < MAC_OS_X_VERSION_10_14
-      // aligned nothrow new is not available until macOS 10.14
-      posix_memalign(reinterpret_cast<void**>(&table->next),
-                     alignof(PluginTable), sizeof(PluginTable));
-      if (table->next) new(table->next) PluginTable;
-#else
-      table->next = new(std::nothrow) PluginTable;
-#endif
-      if (!table->next) {
-        std::snprintf(err, sizeof(err), "failed to allocate memory for the global plugin table");
-        return -1;
-      }
-      table = table->next;
-    }
-
-    // release the attribute names from unique_ptr into a plain array
-    const char** attributes = nullptr;
-    if (plugin->nattribute) {
-      attributes = new(std::nothrow) const char*[plugin->nattribute];
-      if (!attributes) {
-        std::snprintf(err, sizeof(err), "failed to allocate memory for plugin attribute array");
-        return -1;
-      }
-      for (int i = 0; i < plugin->nattribute; ++i) {
-        attributes[i] = attributes_vec[i].release();
-      }
-    }
-
-    // all checked passed, actually register the plugin into the global table
-    mjpPlugin& registered_plugin = table->plugins[local_idx];
-    registered_plugin = *plugin;
-    registered_plugin.name = name.release();
-    registered_plugin.attributes = attributes;
-
-    // increment the global plugin count with a release memory barrier
-    global.count().store(count + 1, std::memory_order_release);
-
-    return count;
-  }();
-
-  // ========= ATTENTION! ==========================================================================
-  // End of safe lambda, do not handle objects with non-trivial destructors beyond this point.
-
-  // plugin registration failed, throw an mju_error
-  if (slot < 0) {
-    err[sizeof(err) - 1] = '\0';
-    mju_error("%s", err);
-  }
-
-  return slot;
+  return GlobalTable<mjpPlugin>::GetSingleton().AppendIfUnique(*plugin);
 }
 
 // look up plugin by slot number, assuming that mjp_pluginCount has already been called
 const mjpPlugin* mjp_getPluginAtSlotUnsafe(int slot, int nslot) {
-  if (slot < 0 || slot >= nslot) {
-    return nullptr;
-  }
-
-  Global& global = GetGlobal();
-  PluginTable* table = &global.table();
-
-  // iterate over blocks in the global table until the local index is less the block size
-  int local_idx = slot;
-  while (local_idx >= PluginTable::kBlockSize) {
-    local_idx -= PluginTable::kBlockSize;
-    table = table->next;
-    if (!table) {
-      return nullptr;
-    }
-  }
-
-  // local_idx is now a valid index into the current block
-  const mjpPlugin& plugin = table->plugins[local_idx];
-  if (!plugin.name) {
-    return nullptr;
-  }
-  return &plugin;
+  return GlobalTable<mjpPlugin>::GetSingleton().GetAtSlotUnsafe(slot, nslot);
 }
 
 // look up plugin by name, assuming that mjp_pluginCount has already been called
 const mjpPlugin* mjp_getPluginUnsafe(const char* name, int* slot, int nslot) {
-  if (slot) *slot = -1;
-
-  if (!name || !name[0]) {
-    return nullptr;
-  }
-
-  Global& plugins = GetGlobal();
-  PluginTable* table = &plugins.table();
-  int found_slot = 0;
-  while (table) {
-    for (int i = 0;
-         i < PluginTable::kBlockSize && found_slot < nslot;
-         ++i, ++found_slot) {
-      const mjpPlugin& plugin = table->plugins[i];
-
-      // reached an uninitialized plugin, which means that iterated beyond the plugin count
-      // this should never happen if `count` was actually returned by mjp_pluginCount
-      if (!plugin.name) {
-        return nullptr;
-      }
-      if (std::strcmp(plugin.name, name) == 0) {
-        if (slot) *slot = found_slot;
-        return &plugin;
-      }
-    }
-    table = table->next;
-  }
-
-  return nullptr;
+  return GlobalTable<mjpPlugin>::GetSingleton().GetByKeyUnsafe(name, slot, nslot);
 }
 
 // return the number of globally registered plugins
 int mjp_pluginCount() {
-  return GetGlobal().count().load(std::memory_order_acquire);
+  return GlobalTable<mjpPlugin>::GetSingleton().count();
 }
-
 
 // look up a plugin by slot number
 const mjpPlugin* mjp_getPluginAtSlot(int slot) {
-  const int count = mjp_pluginCount();
-
-  // mjp_pluginCount uses memory_order_acquire which acts as a barrier that guarantees that all
-  // plugins up to `count` have been completely inserted
-  return mjp_getPluginAtSlotUnsafe(slot, count);
+  return GlobalTable<mjpPlugin>::GetSingleton().GetAtSlot(slot);
 }
 
 // look up a plugin by name, optionally also get its registered slot number
 const mjpPlugin* mjp_getPlugin(const char* name, int* slot) {
-  const int count = mjp_pluginCount();
-  int found_slot = -1;
-  const mjpPlugin* plugin = mjp_getPluginUnsafe(name, &found_slot, count);
-
-  if (slot) *slot = found_slot;
-  return plugin;
+  return GlobalTable<mjpPlugin>::GetSingleton().GetByKey(name, slot);
 }
-
-namespace {
-// seek the nth config attrib of a plugin instance by counting null terminators
-const char* PluginAttrSeek(const mjModel* m, int plugin_id, int attrib_id) {
-  const char* ptr = m->plugin_attr + m->plugin_attradr[plugin_id];
-  for (int i = 0; i < attrib_id; ++i) {
-    while (*ptr) {
-      ++ptr;
-    }
-    ++ptr;
-  }
-  return ptr;
-}
-}  // namespace
-
 
 // return a config attribute of a plugin instance
 // NULL: invalid plugin instance ID or attribute name
@@ -466,12 +327,75 @@ const char* mj_getPluginConfig(const mjModel* m, int plugin_id, const char* attr
   return nullptr;
 }
 
+// set default resource provider definition
+void mjp_defaultResourceProvider(mjpResourceProvider* provider) {
+  std::memset(provider, 0, sizeof(*provider));
+}
+
+// globally register a resource provider (thread-safe), return new slot id
+int mjp_registerResourceProvider(const mjpResourceProvider* provider) {
+  // check if prefix is valid URI scheme format
+  if (!IsValidURISchemeFormat(provider->prefix)) {
+    mju_warning("provider->prefix is '%s' which is not a valid URI scheme format",
+                provider->prefix);
+    return -1;
+  }
+
+  if (!provider->open || !provider->read || !provider->close) {
+    mju_warning("provider must have the open, read, and close callbacks defined");
+    return -1;
+  }
+
+  return GlobalTable<mjpResourceProvider>::GetSingleton().AppendIfUnique(*provider) + 1;
+}
+
+// return the number of globally registered resource providers
+int mjp_resourceProviderCount() {
+  return GlobalTable<mjpResourceProvider>::GetSingleton().count();
+}
+
+// look up a resource provider that matches its prefix against the given resource scheme
+const mjpResourceProvider* mjp_getResourceProvider(const char* resource_name) {
+  if (!resource_name || !resource_name[0]) {
+    return nullptr;
+  }
+
+  const char* ch = std::strchr(resource_name, ':');
+  if (ch == nullptr) {
+    return nullptr;
+  }
+
+  int n = ch - resource_name;
+  std::string file_prefix = std::string(resource_name, n);
+
+  // return NULL if file_prefix doesn't have a valid URI scheme syntax
+  if (!IsValidURISchemeFormat(file_prefix.c_str())) {
+    return nullptr;
+  }
+
+  return GlobalTable<mjpResourceProvider>::GetSingleton().GetByKey(file_prefix.c_str(), nullptr);
+}
+
+// look up a resource provider by slot number
+const mjpResourceProvider* mjp_getResourceProviderAtSlot(int slot) {
+  // shift slot to be zero-indexed
+  return GlobalTable<mjpResourceProvider>::GetSingleton().GetAtSlot(slot - 1);
+}
+
 // load plugins from a dynamic library
 void mj_loadPluginLibrary(const char* path) {
 #if defined(_WIN32) || defined(__CYGWIN__)
   LoadLibraryA(path);
 #else
-  dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  if (!handle) {
+    const char* error = dlerror();
+    if (error) {
+      mju_error("Error loading plugin library '%s': %s\n", path, error);
+    } else {
+      mju_error("Unknown error loading plugin library '%s'\n", path);
+    }
+  }
 #endif
 }
 
@@ -483,9 +407,9 @@ void mj_loadAllPluginLibraries(const char* directory,
     int nplugin_before;
     int nplugin_after;
 
-    Global& global = GetGlobal();
+    auto& plugin_table = GlobalTable<mjpPlugin>::GetSingleton();
     {
-      auto lock = global.lock_mutex_exclusively();
+      auto lock = plugin_table.LockExclusively();
       nplugin_before = mjp_pluginCount();
       mj_loadPluginLibrary(dso_path.c_str());
       nplugin_after = mjp_pluginCount();

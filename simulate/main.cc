@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -22,8 +24,6 @@
 #include <new>
 #include <string>
 #include <thread>
-#include <type_traits>
-#include <vector>
 
 #include <mujoco/mujoco.h>
 #include "glfw_adapter.h"
@@ -56,9 +56,6 @@ const int kErrorLength = 1024;          // load error string length
 // model and data
 mjModel* m = nullptr;
 mjData* d = nullptr;
-
-// control noise variables
-mjtNum* ctrlnoise = nullptr;
 
 using Seconds = std::chrono::duration<double>;
 
@@ -181,8 +178,9 @@ void scanPluginLibraries() {
 #endif
 
 
-  // try to open the ${EXECDIR}/plugin directory
+  // try to open the ${EXECDIR}/MUJOCO_PLUGIN_DIR directory
   // ${EXECDIR} is the directory containing the simulate binary itself
+  // MUJOCO_PLUGIN_DIR is the MUJOCO_PLUGIN_DIR preprocessor macro
   const std::string executable_dir = getExecutableDir();
   if (executable_dir.empty()) {
     return;
@@ -201,6 +199,16 @@ void scanPluginLibraries() {
 
 //------------------------------------------- simulation -------------------------------------------
 
+const char* Diverged(int disableflags, const mjData* d) {
+  if (disableflags & mjDSBL_AUTORESET) {
+    for (mjtWarning w : {mjWARN_BADQACC, mjWARN_BADQVEL, mjWARN_BADQPOS}) {
+      if (d->warning[w].number > 0) {
+        return mju_warningText(w, d->warning[w].lastinfo);
+      }
+    }
+  }
+  return nullptr;
+}
 
 mjModel* LoadModel(const char* file, mj::Simulate& sim) {
   // this copy is needed so that the mju::strlen call below compiles
@@ -215,6 +223,7 @@ mjModel* LoadModel(const char* file, mj::Simulate& sim) {
   // load and compile
   char loadError[kErrorLength] = "";
   mjModel* mnew = 0;
+  auto load_start = mj::Simulate::Clock::now();
   if (mju::strlen_arr(filename)>4 &&
       !std::strncmp(filename + mju::strlen_arr(filename) - 4, ".mjb",
                     mju::sizeof_arr(filename) - mju::strlen_arr(filename)+4)) {
@@ -223,7 +232,8 @@ mjModel* LoadModel(const char* file, mj::Simulate& sim) {
       mju::strcpy_arr(loadError, "could not load binary model");
     }
   } else {
-    mnew = mj_loadXML(filename, nullptr, loadError, mj::Simulate::kMaxFilenameLength);
+    mnew = mj_loadXML(filename, nullptr, loadError, kErrorLength);
+
     // remove trailing newline character from loadError
     if (loadError[0]) {
       int error_length = mju::strlen_arr(loadError);
@@ -232,11 +242,12 @@ mjModel* LoadModel(const char* file, mj::Simulate& sim) {
       }
     }
   }
-
-  mju::strcpy_arr(sim.loadError, loadError);
+  auto load_interval = mj::Simulate::Clock::now() - load_start;
+  double load_seconds = Seconds(load_interval).count();
 
   if (!mnew) {
     std::printf("%s\n", loadError);
+    mju::strcpy_arr(sim.load_error, loadError);
     return nullptr;
   }
 
@@ -246,6 +257,13 @@ mjModel* LoadModel(const char* file, mj::Simulate& sim) {
     std::printf("Model compiled, but simulation warning (paused):\n  %s\n", loadError);
     sim.run = 0;
   }
+
+  // if no error and load took more than 1/4 seconds, report load time
+  else if (load_seconds > 0.25) {
+    mju::sprintf_arr(loadError, "Model loaded in %.2g seconds", load_seconds);
+  }
+
+  mju::strcpy_arr(sim.load_error, loadError);
 
   return mnew;
 }
@@ -259,13 +277,17 @@ void PhysicsLoop(mj::Simulate& sim) {
   // run until asked to exit
   while (!sim.exitrequest.load()) {
     if (sim.droploadrequest.load()) {
+      sim.LoadMessage(sim.dropfilename);
       mjModel* mnew = LoadModel(sim.dropfilename, sim);
       sim.droploadrequest.store(false);
 
       mjData* dnew = nullptr;
       if (mnew) dnew = mj_makeData(mnew);
       if (dnew) {
-        sim.load(sim.dropfilename, mnew, dnew);
+        sim.Load(mnew, dnew, sim.dropfilename);
+
+        // lock the sim mutex
+        const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
 
         mj_deleteData(d);
         mj_deleteModel(m);
@@ -274,20 +296,22 @@ void PhysicsLoop(mj::Simulate& sim) {
         d = dnew;
         mj_forward(m, d);
 
-        // allocate ctrlnoise
-        free(ctrlnoise);
-        ctrlnoise = (mjtNum*) malloc(sizeof(mjtNum)*m->nu);
-        mju_zero(ctrlnoise, m->nu);
+      } else {
+        sim.LoadMessageClear();
       }
     }
 
     if (sim.uiloadrequest.load()) {
       sim.uiloadrequest.fetch_sub(1);
+      sim.LoadMessage(sim.filename);
       mjModel* mnew = LoadModel(sim.filename, sim);
       mjData* dnew = nullptr;
       if (mnew) dnew = mj_makeData(mnew);
       if (dnew) {
-        sim.load(sim.filename, mnew, dnew);
+        sim.Load(mnew, dnew, sim.filename);
+
+        // lock the sim mutex
+        const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
 
         mj_deleteData(d);
         mj_deleteModel(m);
@@ -296,10 +320,8 @@ void PhysicsLoop(mj::Simulate& sim) {
         d = dnew;
         mj_forward(m, d);
 
-        // allocate ctrlnoise
-        free(ctrlnoise);
-        ctrlnoise = static_cast<mjtNum*>(malloc(sizeof(mjtNum)*m->nu));
-        mju_zero(ctrlnoise, m->nu);
+      } else {
+        sim.LoadMessageClear();
       }
     }
 
@@ -313,12 +335,14 @@ void PhysicsLoop(mj::Simulate& sim) {
 
     {
       // lock the sim mutex
-      const std::lock_guard<std::mutex> lock(sim.mtx);
+      const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
 
       // run only if model is present
       if (m) {
         // running
         if (sim.run) {
+          bool stepped = false;
+
           // record cpu time at start of iteration
           const auto startCPU = mj::Simulate::Clock::now();
 
@@ -326,43 +350,30 @@ void PhysicsLoop(mj::Simulate& sim) {
           const auto elapsedCPU = startCPU - syncCPU;
           double elapsedSim = d->time - syncSim;
 
-          // inject noise
-          if (sim.ctrlnoisestd) {
-            // convert rate and scale to discrete time (Ornstein–Uhlenbeck)
-            mjtNum rate = mju_exp(-m->opt.timestep / mju_max(sim.ctrlnoiserate, mjMINVAL));
-            mjtNum scale = sim.ctrlnoisestd * mju_sqrt(1-rate*rate);
-
-            for (int i=0; i<m->nu; i++) {
-              // update noise
-              ctrlnoise[i] = rate * ctrlnoise[i] + scale * mju_standardNormal(nullptr);
-
-              // apply noise
-              d->ctrl[i] = ctrlnoise[i];
-            }
-          }
-
           // requested slow-down factor
-          double slowdown = 100 / sim.percentRealTime[sim.realTimeIndex];
+          double slowdown = 100 / sim.percentRealTime[sim.real_time_index];
 
           // misalignment condition: distance from target sim time is bigger than syncmisalign
           bool misaligned =
-              mju_abs(Seconds(elapsedCPU).count()/slowdown - elapsedSim) > syncMisalign;
+              std::abs(Seconds(elapsedCPU).count()/slowdown - elapsedSim) > syncMisalign;
 
           // out-of-sync (for any reason): reset sync times, step
           if (elapsedSim < 0 || elapsedCPU.count() < 0 || syncCPU.time_since_epoch().count() == 0 ||
-              misaligned || sim.speedChanged) {
+              misaligned || sim.speed_changed) {
             // re-sync
             syncCPU = startCPU;
             syncSim = d->time;
-            sim.speedChanged = false;
-
-            // clear old perturbations, apply new
-            mju_zero(d->xfrc_applied, 6*m->nbody);
-            sim.applyposepertubations(0);  // move mocap bodies only
-            sim.applyforceperturbations();
+            sim.speed_changed = false;
 
             // run single step, let next iteration deal with timing
             mj_step(m, d);
+            const char* message = Diverged(m->opt.disableflags, d);
+            if (message) {
+              sim.run = 0;
+              mju::strcpy_arr(sim.load_error, message);
+            } else {
+              stepped = true;
+            }
           }
 
           // in-sync: step until ahead of cpu
@@ -370,25 +381,30 @@ void PhysicsLoop(mj::Simulate& sim) {
             bool measured = false;
             mjtNum prevSim = d->time;
 
-            double refreshTime = simRefreshFraction/sim.refreshRate;
+            double refreshTime = simRefreshFraction/sim.refresh_rate;
 
             // step while sim lags behind cpu and within refreshTime
             while (Seconds((d->time - syncSim)*slowdown) < mj::Simulate::Clock::now() - syncCPU &&
                    mj::Simulate::Clock::now() - startCPU < Seconds(refreshTime)) {
               // measure slowdown before first step
               if (!measured && elapsedSim) {
-                sim.measuredSlowdown =
+                sim.measured_slowdown =
                     std::chrono::duration<double>(elapsedCPU).count() / elapsedSim;
                 measured = true;
               }
 
-              // clear old perturbations, apply new
-              mju_zero(d->xfrc_applied, 6*m->nbody);
-              sim.applyposepertubations(0);  // move mocap bodies only
-              sim.applyforceperturbations();
+              // inject noise
+              sim.InjectNoise();
 
               // call mj_step
               mj_step(m, d);
+              const char* message = Diverged(m->opt.disableflags, d);
+              if (message) {
+                sim.run = 0;
+                mju::strcpy_arr(sim.load_error, message);
+              } else {
+                stepped = true;
+              }
 
               // break if reset
               if (d->time < prevSim) {
@@ -396,15 +412,18 @@ void PhysicsLoop(mj::Simulate& sim) {
               }
             }
           }
+
+          // save current state to history buffer
+          if (stepped) {
+            sim.AddToHistory();
+          }
         }
 
         // paused
         else {
-          // apply pose perturbation
-          sim.applyposepertubations(1);  // move mocap and dynamic bodies
-
           // run mj_forward, to update rendering and joint sliders
           mj_forward(m, d);
+          sim.speed_changed = true;
         }
       }
     }  // release std::lock_guard<std::mutex>
@@ -417,23 +436,30 @@ void PhysicsLoop(mj::Simulate& sim) {
 void PhysicsThread(mj::Simulate* sim, const char* filename) {
   // request loadmodel if file given (otherwise drag-and-drop)
   if (filename != nullptr) {
+    sim->LoadMessage(filename);
     m = LoadModel(filename, *sim);
-    if (m) d = mj_makeData(m);
+    if (m) {
+      // lock the sim mutex
+      const std::unique_lock<std::recursive_mutex> lock(sim->mtx);
+
+      d = mj_makeData(m);
+    }
     if (d) {
-      sim->load(filename, m, d);
+      sim->Load(m, d, filename);
+
+      // lock the sim mutex
+      const std::unique_lock<std::recursive_mutex> lock(sim->mtx);
+
       mj_forward(m, d);
 
-      // allocate ctrlnoise
-      free(ctrlnoise);
-      ctrlnoise = static_cast<mjtNum*>(malloc(sizeof(mjtNum)*m->nu));
-      mju_zero(ctrlnoise, m->nu);
+    } else {
+      sim->LoadMessageClear();
     }
   }
 
   PhysicsLoop(*sim);
 
   // delete everything we allocated
-  free(ctrlnoise);
   mj_deleteData(d);
   mj_deleteModel(m);
 }
@@ -450,7 +476,8 @@ __attribute__((used, visibility("default"))) extern "C" void _mj_rosettaError(co
 #endif
 
 // run event loop
-int main(int argc, const char** argv) {
+int main(int argc, char** argv) {
+
   // display an error if running on macOS under Rosetta 2
 #if defined(__APPLE__) && defined(__AVX__)
   if (rosetta_error_msg) {
@@ -468,9 +495,20 @@ int main(int argc, const char** argv) {
   // scan for libraries in the plugin directory to load additional plugins
   scanPluginLibraries();
 
+  mjvCamera cam;
+  mjv_defaultCamera(&cam);
+
+  mjvOption opt;
+  mjv_defaultOption(&opt);
+
+  mjvPerturb pert;
+  mjv_defaultPerturb(&pert);
+
   // simulate object encapsulates the UI
   auto sim = std::make_unique<mj::Simulate>(
-      std::make_unique<mj::GlfwAdapter>());
+      std::make_unique<mj::GlfwAdapter>(),
+      &cam, &opt, &pert, /* is_passive = */ false
+  );
 
   const char* filename = nullptr;
   if (argc >  1) {
@@ -481,7 +519,7 @@ int main(int argc, const char** argv) {
   std::thread physicsthreadhandle(&PhysicsThread, sim.get(), filename);
 
   // start simulation UI loop (blocking call)
-  sim->renderloop();
+  sim->RenderLoop();
   physicsthreadhandle.join();
 
   return 0;
