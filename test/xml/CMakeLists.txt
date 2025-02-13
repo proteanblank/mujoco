@@ -13,15 +13,14 @@
 # limitations under the License.
 
 mujoco_test(xml_api_test)
-target_link_libraries(xml_api_test fixture gmock)
 
 mujoco_test(xml_native_reader_test)
-target_link_libraries(xml_native_reader_test fixture gmock)
 
-mujoco_test(xml_native_writer_test)
-target_link_libraries(
+mujoco_test(
   xml_native_writer_test
-  fixture
-  gmock
+  ADDITIONAL_LINK_LIBRARIES
   absl::flat_hash_set
+  PROPERTIES
+  ENVIRONMENT
+  "MUJOCO_PLUGIN_DIR=$<TARGET_FILE_DIR:elasticity>"
 )

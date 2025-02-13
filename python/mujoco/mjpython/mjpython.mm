@@ -42,7 +42,6 @@ __attribute__((used)) void mjpython_show_dock_icon() {
 }
 }  // extern "C"
 
-// TODO(b/273744079): Remove Python 3.7 code after end-of-life (27 Jun 2023).
 namespace {
 // 16MiB is the default Python thread stack size on macOS as of Python 3.11
 // https://bugs.python.org/issue18075
@@ -51,25 +50,16 @@ constexpr rlim_t kThreadStackSize = 0x1000000;
 struct {
 #define CPYTHON_FN(fname) decltype(&::fname) fname
 
-#if PY_MINOR_VERSION >= 8
-  CPYTHON_FN(Py_InitializeFromConfig);
-  CPYTHON_FN(Py_RunMain);
+  // go/keep-sorted start
   CPYTHON_FN(PyConfig_Clear);
   CPYTHON_FN(PyConfig_InitPythonConfig);
   CPYTHON_FN(PyConfig_SetBytesArgv);
-#else
-  CPYTHON_FN(Py_DecodeLocale);
-  CPYTHON_FN(Py_Initialize);
-  CPYTHON_FN(Py_Main);
-  CPYTHON_FN(PyMem_RawFree);
-  CPYTHON_FN(Py_SetProgramName);
-#endif
-
-  // go/keep-sorted start
-  CPYTHON_FN(Py_FinalizeEx);
   CPYTHON_FN(PyGILState_Ensure);
   CPYTHON_FN(PyGILState_Release);
   CPYTHON_FN(PyRun_SimpleStringFlags);
+  CPYTHON_FN(Py_FinalizeEx);
+  CPYTHON_FN(Py_InitializeFromConfig);
+  CPYTHON_FN(Py_RunMain);
   // go/keep-sorted end
 
 #undef CPYTHON_FN
@@ -88,117 +78,128 @@ void* mjpython_pymain(void* vargs) {
   PyGILState_STATE gil;
 
   // Initialize the Python interpreter.
-#if PY_MINOR_VERSION >= 8
   PyConfig config;
   cpython.PyConfig_InitPythonConfig(&config);
   cpython.PyConfig_SetBytesArgv(&config, args->argc, args->argv);
   cpython.Py_InitializeFromConfig(&config);
   cpython.PyConfig_Clear(&config);
-#else
-  // Convert each argv to wchar_t* (needed for Py_Main).
-  wchar_t** wargv = static_cast<wchar_t**>(std::calloc(args->argc, sizeof(wchar_t*)));
-  for (int i = 0; i < args->argc; ++i) {
-    wargv[i] = cpython.Py_DecodeLocale(args->argv[i], nullptr);
-  }
-  cpython.Py_SetProgramName(wargv[0]);
-  cpython.Py_Initialize();
-#endif
 
   // Set up the condition variable to pass control back to the macOS main thread.
   gil = cpython.PyGILState_Ensure();
-  cpython.PyRun_SimpleStringFlags("import threading; cond = threading.Condition()", nullptr);
+  cpython.PyRun_SimpleStringFlags(R"(
+def _mjpython_make_cond():
+  # Don't pollute the global namespace.
+  global _mjpython_make_cond
+  del _mjpython_make_cond
+
+  import threading
+
+  global cond
+  cond = threading.Condition()
+
+_mjpython_make_cond()
+)", nullptr);
   py_initialized.store(true);
 
   // Wait until GLFW is initialized on macOS main thread, set up the queue and an atexit hook
   // to enqueue a termination flag upon exit.
   cpython.PyRun_SimpleStringFlags(R"(
-import atexit
+def _mjpython_init():
+  # Don't pollute the global namespace.
+  global _mjpython_init
+  del _mjpython_init
 
-# The mujoco.viewer module should only be imported here after glfw.init() in the macOS main thread.
-with cond:
-  cond.wait()
-import mujoco.viewer
+  import atexit
+  import threading
 
-# Similar to a queue.Queue(maxsize=1), but where only one active task is allowed at a time.
-# With queue.Queue(1), another item is allowed to be enqueued before task_done is called.
-class _MjPythonImpl(mujoco.viewer._MjPythonBase):
+  # The mujoco.viewer module should only be imported after glfw.init() in the macOS main thread.
+  with cond:
+    cond.wait()
+  import mujoco.viewer
 
-  # Termination statuses
-  NOT_TERMINATED = 0
-  TERMINATION_REQUESTED = 1
-  TERMINATION_ACCEPTED = 2
-  TERMINATED = 3
+  # Similar to a queue.Queue(maxsize=1), but where only one active task is allowed at a time.
+  # With queue.Queue(1), another item is allowed to be enqueued before task_done is called.
+  class _MjPythonImpl(mujoco.viewer._MjPythonBase):
 
-  def __init__(self):
-    self._cond = threading.Condition()
-    self._model_data = None
-    self._termination = self.__class__.NOT_TERMINATED
-    self._busy = False
+    # Termination statuses
+    NOT_TERMINATED = 0
+    TERMINATION_REQUESTED = 1
+    TERMINATION_ACCEPTED = 2
+    TERMINATED = 3
 
-  def launch_on_ui_thread(self, model, data):
-    with self._cond:
-      if self._busy or self._model_data is not None:
-        raise RuntimeError('another MuJoCo viewer is already open')
-      else:
-        self._model_data = (model, data)
+    def __init__(self):
+      self._cond = threading.Condition()
+      self._task = None
+      self._termination = self.__class__.NOT_TERMINATED
+      self._busy = False
+
+    def launch_on_ui_thread(
+        self,
+        model,
+        data,
+        handle_return,
+        key_callback,
+        show_left_ui,
+        show_right_ui,
+    ):
+      with self._cond:
+        if self._busy or self._task is not None:
+          raise RuntimeError('another MuJoCo viewer is already open')
+        else:
+          self._task = (
+              model,
+              data,
+              handle_return,
+              key_callback,
+              show_left_ui,
+              show_right_ui,
+          )
+          self._cond.notify()
+
+    def terminate(self):
+      with self._cond:
+        self._termination = self.__class__.TERMINATION_REQUESTED
+        self._cond.notify()
+        self._cond.wait_for(
+            lambda: self._termination == self.__class__.TERMINATED)
+
+    def get(self):
+      with self._cond:
+        self._cond.wait_for(
+            lambda: self._task is not None or self._termination)
+
+        if self._termination:
+          if self._termination == self.__class__.TERMINATION_REQUESTED:
+            self._termination = self.__class__.TERMINATION_ACCEPTED
+          return None
+
+        task = self._task
+        self._busy = True
+        self._task = None
+        return task
+
+    def done(self):
+      with self._cond:
+        self._busy = False
+        if self._termination == self.__class__.TERMINATION_ACCEPTED:
+          self._termination = self.__class__.TERMINATED
         self._cond.notify()
 
-  def terminate(self):
-    with self._cond:
-      self._termination = self.__class__.TERMINATION_REQUESTED
-      self._cond.notify()
-      self._cond.wait_for(
-          lambda: self._termination == self.__class__.TERMINATED)
 
-  def get(self):
-    with self._cond:
-      self._cond.wait_for(
-          lambda: self._model_data is not None or self._termination)
+  mujoco.viewer._MJPYTHON = _MjPythonImpl()
+  atexit.register(mujoco.viewer._MJPYTHON.terminate)
 
-      if self._termination:
-        if self._termination == self.__class__.TERMINATION_REQUESTED:
-          self._termination = self.__class__.TERMINATION_ACCEPTED
-        return None
+  with cond:
+    cond.notify()
 
-      model_data = self._model_data
-      self._busy = True
-      self._model_data = None
-      return model_data
-
-  def done(self):
-    with self._cond:
-      self._busy = False
-      if self._termination == self.__class__.TERMINATION_ACCEPTED:
-        self._termination = self.__class__.TERMINATED
-      self._cond.notify()
-
-
-mujoco.viewer._MJPYTHON = _MjPythonImpl()
-atexit.register(mujoco.viewer._MJPYTHON.terminate)
-del _MjPythonImpl  # Don't pollute globals for user script.
-
-with cond:
-  cond.notify()
-del cond  # Don't pollute globals for user script.
+_mjpython_init()
 )", nullptr);
 
   // Run the Python interpreter main loop.
-#if PY_MINOR_VERSION >= 8
   cpython.Py_RunMain();
-#else
-  cpython.Py_Main(args->argc, wargv);
-#endif
 
   // Tear down the interpreter.
   cpython.Py_FinalizeEx();
-#if PY_MINOR_VERSION < 8
-  for (int i = 0; i < args->argc; ++i) {
-    cpython.PyMem_RawFree(wargv[i]);
-    wargv[i] = nullptr;
-  }
-  std::free(wargv);
-  wargv = nullptr;
-#endif
   return nullptr;
 }
 }  // namespace
@@ -256,25 +257,16 @@ int main(int argc, char** argv) {
     }                                                                                    \
   }
 
-#if PY_MINOR_VERSION >= 8
-  CPYTHON_INITFN(Py_InitializeFromConfig);
-  CPYTHON_INITFN(Py_RunMain);
+  // go/keep-sorted start
   CPYTHON_INITFN(PyConfig_Clear);
   CPYTHON_INITFN(PyConfig_InitPythonConfig);
   CPYTHON_INITFN(PyConfig_SetBytesArgv);
-#else
-  CPYTHON_INITFN(Py_DecodeLocale);
-  CPYTHON_INITFN(Py_Initialize);
-  CPYTHON_INITFN(Py_Main);
-  CPYTHON_INITFN(PyMem_RawFree);
-  CPYTHON_INITFN(Py_SetProgramName);
-#endif
-
-  // go/keep-sorted start
-  CPYTHON_INITFN(Py_FinalizeEx);
   CPYTHON_INITFN(PyGILState_Ensure);
   CPYTHON_INITFN(PyGILState_Release);
   CPYTHON_INITFN(PyRun_SimpleStringFlags);
+  CPYTHON_INITFN(Py_FinalizeEx);
+  CPYTHON_INITFN(Py_InitializeFromConfig);
+  CPYTHON_INITFN(Py_RunMain);
   // go/keep-sorted end
 
 #undef CPYTHON_INITFN
@@ -309,39 +301,56 @@ int main(int argc, char** argv) {
   // to finish setting up _MJPYTHON, then serve incoming viewer launch requests.
   PyGILState_STATE gil = cpython.PyGILState_Ensure();
   cpython.PyRun_SimpleStringFlags(R"(
-import ctypes
+def _mjpython_main():
+  # Don't pollute the global namespace.
+  global _mjpython_main
+  del _mjpython_main
 
-# GLFW must be initialized on the OS main thread (i.e. here).
-import glfw
-import mujoco.viewer
+  import ctypes
 
-glfw.init()
-glfw.poll_events()
-ctypes.CDLL(None).mjpython_hide_dock_icon()
+  # GLFW must be initialized on the OS main thread (i.e. here).
+  import glfw
+  import mujoco.viewer
 
-# Wait for Python main thread to finish setting up _MJPYTHON
-with cond:
-  cond.notify()
-  cond.wait()
+  glfw.init()
+  glfw.poll_events()
+  ctypes.CDLL(None).mjpython_hide_dock_icon()
 
-while True:
-  try:
-    # Wait for an incoming payload.
-    payload = mujoco.viewer._MJPYTHON.get()
+  # Wait for Python main thread to finish setting up _MJPYTHON
+  global cond
+  with cond:
+    cond.notify()
+    cond.wait()
+  del cond
 
-    # None means that we are exiting.
-    if payload is None:
-      glfw.terminate()
-      break
+  while True:
+    try:
+      # Wait for an incoming payload.
+      task = mujoco.viewer._MJPYTHON.get()
 
-    # Otherwise, launch the viewer.
-    model, data = payload
-    ctypes.CDLL(None).mjpython_show_dock_icon()
-    mujoco.viewer._launch_internal(model, data, run_physics_thread=False)
-    ctypes.CDLL(None).mjpython_hide_dock_icon()
+      # None means that we are exiting.
+      if task is None:
+        glfw.terminate()
+        break
 
-  finally:
-    mujoco.viewer._MJPYTHON.done()
+      # Otherwise, launch the viewer.
+      model, data, handle_return, key_callback, show_left_ui, show_right_ui = task
+      ctypes.CDLL(None).mjpython_show_dock_icon()
+      mujoco.viewer._launch_internal(
+          model,
+          data,
+          run_physics_thread=False,
+          handle_return=handle_return,
+          key_callback=key_callback,
+          show_left_ui=show_left_ui,
+          show_right_ui=show_right_ui,
+      )
+      ctypes.CDLL(None).mjpython_hide_dock_icon()
+
+    finally:
+      mujoco.viewer._MJPYTHON.done()
+
+_mjpython_main()
 )", nullptr);
   cpython.PyGILState_Release(gil);
 

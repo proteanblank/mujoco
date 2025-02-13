@@ -84,7 +84,7 @@ if(NOT TARGET mujoco)
     if(MUJOCO_FRAMEWORK)
       message("MuJoCo framework is at ${MUJOCO_FRAMEWORK}/mujoco.framework")
       set(MUJOCO_LIBRARY
-          ${MUJOCO_FRAMEWORK}/mujoco.framework/Versions/A/libmujoco.2.3.3.dylib
+          ${MUJOCO_FRAMEWORK}/mujoco.framework/Versions/A/libmujoco.3.2.8.dylib
       )
       target_compile_options(mujoco INTERFACE -F${MUJOCO_FRAMEWORK})
     endif()
@@ -92,7 +92,7 @@ if(NOT TARGET mujoco)
 
   if(NOT MUJOCO_FRAMEWORK)
     find_library(
-      MUJOCO_LIBRARY mujoco mujoco.2.3.3 HINTS ${MUJOCO_LIBRARY_DIR} REQUIRED
+      MUJOCO_LIBRARY mujoco mujoco.3.2.8 HINTS ${MUJOCO_LIBRARY_DIR} REQUIRED
     )
     find_path(MUJOCO_INCLUDE mujoco/mujoco.h HINTS ${MUJOCO_INCLUDE_DIR} REQUIRED)
     message("MuJoCo is at ${MUJOCO_LIBRARY}")
@@ -140,7 +140,7 @@ findorfetch(
   GIT_REPO
   https://github.com/abseil/abseil-cpp
   GIT_TAG
-  c8a2f92586fe9b4e1aff049108f5db8064924d8e # LTS 20230125.1
+  4447c7562e3bc702ade25105912dce503f0c4010 # LTS 20240722.0
   TARGETS
   ${MUJOCO_PYTHON_ABSL_TARGETS}
   EXCLUDE_FROM_ALL
@@ -173,16 +173,17 @@ findorfetch(
   GIT_REPO
   https://gitlab.com/libeigen/eigen
   GIT_TAG
-  3460f3558e7b469efb8a225894e21929c8c77629
+  7f2377859377da6f22152015c28b12c04752af77
   TARGETS
   Eigen3::Eigen
   EXCLUDE_FROM_ALL
 )
 
 # ==================== PYBIND11 ================================================
+option(MUJOCO_PYTHON_USE_SYSTEM_PYBIND11 "Use installed pybind11 version." OFF)
 findorfetch(
   USE_SYSTEM_PACKAGE
-  OFF
+  MUJOCO_PYTHON_USE_SYSTEM_PYBIND11
   PACKAGE_NAME
   pybind11
   LIBRARY_NAME
@@ -190,7 +191,7 @@ findorfetch(
   GIT_REPO
   https://github.com/pybind/pybind11
   GIT_TAG
-  0bd8896a4010f2d91b2340570c24fa08606ec406 # v2.10.3
+  a2e59f0e7065404b44dfe92a28aca47ba1378dc4 # v2.13.6
   TARGETS
   pybind11::pybind11_headers
   EXCLUDE_FROM_ALL
@@ -202,6 +203,11 @@ set(SIMULATE_GLFW_DYNAMIC_SYMBOLS ON)
 add_subdirectory(simulate)
 
 add_subdirectory(util)
+
+add_library(mujoco_private_api_header INTERFACE)
+target_sources(mujoco_private_api_header INTERFACE private.h)
+set_target_properties(mujoco_private_api_header PROPERTIES PUBLIC_HEADER private.h)
+target_link_libraries(mujoco_private_api_header INTERFACE mujoco)
 
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/enum_traits.h)
   add_library(enum_traits INTERFACE)
@@ -242,7 +248,13 @@ target_link_libraries(function_traits INTERFACE mujoco absl::core_headers)
 add_library(errors_header INTERFACE)
 target_sources(errors_header INTERFACE errors.h)
 set_target_properties(errors_header PROPERTIES PUBLIC_HEADER errors.h)
-target_link_libraries(errors_header INTERFACE crossplatform func_wrap mujoco)
+target_link_libraries(
+  errors_header
+  INTERFACE crossplatform
+            func_wrap
+            mujoco
+            mujoco_private_api_header
+)
 
 add_library(raw INTERFACE)
 target_sources(raw INTERFACE raw.h)
@@ -254,7 +266,6 @@ target_sources(
   structs_header
   INTERFACE indexer_xmacro.h
             indexers.h
-            mjdata_meta.h
             structs.h
 )
 set_target_properties(structs_header PROPERTIES PUBLIC_HEADER structs.h)
@@ -300,6 +311,11 @@ macro(mujoco_pybind11_module name)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
       # Only allow fallthrough annotation via __attribute__.
       target_compile_options(${name} PRIVATE -Wimplicit-fallthrough=5)
+
+      # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=109561
+      if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 11)
+        target_compile_options(${name} PRIVATE -Wno-maybe-uninitialized)
+      endif()
     endif()
   endif()
   set_target_properties(${name} PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
@@ -367,7 +383,7 @@ target_link_libraries(
           structs_header
 )
 
-mujoco_pybind11_module(_rollout rollout.cc)
+mujoco_pybind11_module(_rollout rollout.cc threadpool.cc)
 target_link_libraries(_rollout PRIVATE functions_header mujoco raw)
 
 mujoco_pybind11_module(
@@ -381,10 +397,34 @@ target_link_libraries(
   PRIVATE absl::flat_hash_map
           crossplatform
           mujoco
+          mujoco_private_api_header
           raw
           errors_header
           func_wrap
           function_traits
+          structs_header
+)
+
+if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/specs.cc.inc)
+  add_custom_command(
+    OUTPUT specs.cc.inc
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=${mujoco_SOURCE_DIR}/mujoco ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/codegen/generate_spec_bindings.py > specs.cc.inc
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/codegen/generate_spec_bindings.py
+  )
+endif()
+
+mujoco_pybind11_module(
+  _specs
+  specs.cc
+  specs.cc.inc
+)
+target_link_libraries(
+  _specs
+  PRIVATE mujoco
+          Eigen3::Eigen
+          errors_header
+          raw
           structs_header
 )
 
@@ -393,6 +433,7 @@ target_link_libraries(
   _simulate
   PRIVATE mujoco
           mujoco::libsimulate
+          errors_header
           raw
           structs_header
 )
@@ -406,6 +447,7 @@ set(LIBRARIES_FOR_WHEEL
     "$<TARGET_FILE:_render>"
     "$<TARGET_FILE:_rollout>"
     "$<TARGET_FILE:_simulate>"
+    "$<TARGET_FILE:_specs>"
     "$<TARGET_FILE:_structs>"
     "$<TARGET_FILE:mujoco>"
 )
@@ -441,6 +483,7 @@ if(MUJOCO_PYTHON_MAKE_WHEEL)
     _render
     _rollout
     _simulate
+    _specs
     _structs
     mujoco
   )

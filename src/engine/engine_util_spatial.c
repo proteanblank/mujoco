@@ -14,8 +14,6 @@
 
 #include "engine/engine_util_spatial.h"
 
-#include <math.h>
-
 #include <mujoco/mjmodel.h>
 #include "engine/engine_util_blas.h"
 #include "engine/engine_util_errmem.h"
@@ -25,18 +23,25 @@
 
 // rotate vector by quaternion
 void mju_rotVecQuat(mjtNum res[3], const mjtNum vec[3], const mjtNum quat[4]) {
+  // zero vec: zero res
+  if (vec[0] == 0 && vec[1] == 0 && vec[2] == 0) {
+    mju_zero3(res);
+  }
+
   // null quat: copy vec
-  if (quat[0]==1 && quat[1]==0 && quat[2]==0 && quat[3]==0) {
+  else if (quat[0] == 1 && quat[1] == 0 && quat[2] == 0 && quat[3] == 0) {
     mju_copy3(res, vec);
   }
 
   // regular processing
   else {
-    mjtNum tmp[3];
     // tmp = q_w * v + cross(q_xyz, v)
-    tmp[0] = quat[0]*vec[0] + quat[2]*vec[2] - quat[3]*vec[1];
-    tmp[1] = quat[0]*vec[1] + quat[3]*vec[0] - quat[1]*vec[2];
-    tmp[2] = quat[0]*vec[2] + quat[1]*vec[1] - quat[2]*vec[0];
+    mjtNum tmp[3] = {
+      quat[0]*vec[0] + quat[2]*vec[2] - quat[3]*vec[1],
+      quat[0]*vec[1] + quat[3]*vec[0] - quat[1]*vec[2],
+      quat[0]*vec[2] + quat[1]*vec[1] - quat[2]*vec[0]
+    };
+
     // res = v + 2 * cross(q_xyz, t)
     res[0] = vec[0] + 2 * (quat[2]*tmp[2] - quat[3]*tmp[1]);
     res[1] = vec[1] + 2 * (quat[3]*tmp[0] - quat[1]*tmp[2]);
@@ -75,7 +80,7 @@ void mju_mulQuat(mjtNum res[4], const mjtNum qa[4], const mjtNum qb[4]) {
 // multiply quaternion and axis
 void mju_mulQuatAxis(mjtNum res[4], const mjtNum quat[4], const mjtNum axis[3]) {
   mjtNum tmp[4] = {
-   -quat[1]*axis[0] - quat[2]*axis[1] - quat[3]*axis[2],
+    -quat[1]*axis[0] - quat[2]*axis[1] - quat[3]*axis[2],
     quat[0]*axis[0] + quat[2]*axis[2] - quat[3]*axis[1],
     quat[0]*axis[1] + quat[3]*axis[0] - quat[1]*axis[2],
     quat[0]*axis[2] + quat[1]*axis[1] - quat[2]*axis[0]
@@ -91,7 +96,7 @@ void mju_mulQuatAxis(mjtNum res[4], const mjtNum quat[4], const mjtNum axis[3]) 
 // convert axisAngle to quaternion
 void mju_axisAngle2Quat(mjtNum res[4], const mjtNum axis[3], mjtNum angle) {
   // zero angle: null quat
-  if (angle==0) {
+  if (angle == 0) {
     res[0] = 1;
     res[1] = 0;
     res[2] = 0;
@@ -117,7 +122,7 @@ void mju_quat2Vel(mjtNum res[3], const mjtNum quat[4], mjtNum dt) {
   mjtNum speed = 2 * mju_atan2(sin_a_2, quat[0]);
 
   // when axis-angle is larger than pi, rotation is in the opposite direction
-  if (speed>mjPI) {
+  if (speed > mjPI) {
     speed -= 2*mjPI;
   }
   speed /= dt;
@@ -143,7 +148,7 @@ void mju_subQuat(mjtNum res[3], const mjtNum qa[4], const mjtNum qb[4]) {
 // convert quaternion to 3D rotation matrix
 void mju_quat2Mat(mjtNum res[9], const mjtNum quat[4]) {
   // null quat: identity
-  if (quat[0]==1 && quat[1]==0 && quat[2]==0 && quat[3]==0) {
+  if (quat[0] == 1 && quat[1] == 0 && quat[2] == 0 && quat[3] == 0) {
     res[0] = 1;
     res[1] = 0;
     res[2] = 0;
@@ -186,7 +191,7 @@ void mju_quat2Mat(mjtNum res[9], const mjtNum quat[4]) {
 // convert 3D rotation matrix to quaternion
 void mju_mat2Quat(mjtNum quat[4], const mjtNum mat[9]) {
   // q0 largest
-  if (mat[0]+mat[4]+mat[8]>0) {
+  if (mat[0]+mat[4]+mat[8] > 0) {
     quat[0] = 0.5 * mju_sqrt(1 + mat[0] + mat[4] + mat[8]);
     quat[1] = 0.25 * (mat[7] - mat[5]) / quat[0];
     quat[2] = 0.25 * (mat[2] - mat[6]) / quat[0];
@@ -194,7 +199,7 @@ void mju_mat2Quat(mjtNum quat[4], const mjtNum mat[9]) {
   }
 
   // q1 largest
-  else if (mat[0]>mat[4] && mat[0]>mat[8]) {
+  else if (mat[0] > mat[4] && mat[0] > mat[8]) {
     quat[1] = 0.5 * mju_sqrt(1 + mat[0] - mat[4] - mat[8]);
     quat[0] = 0.25 * (mat[7] - mat[5]) / quat[1];
     quat[2] = 0.25 * (mat[1] + mat[3]) / quat[1];
@@ -202,7 +207,7 @@ void mju_mat2Quat(mjtNum quat[4], const mjtNum mat[9]) {
   }
 
   // q2 largest
-  else if (mat[4]>mat[8]) {
+  else if (mat[4] > mat[8]) {
     quat[2] = 0.5 * mju_sqrt(1 - mat[0] + mat[4] - mat[8]);
     quat[0] = 0.25 * (mat[2] - mat[6]) / quat[2];
     quat[1] = 0.25 * (mat[1] + mat[3]) / quat[2];
@@ -240,8 +245,8 @@ void mju_quatIntegrate(mjtNum quat[4], const mjtNum vel[3], mjtNum scale) {
   mju_copy3(tmp, vel);
   angle = scale * mju_normalize3(tmp);
   mju_axisAngle2Quat(qrot, tmp, angle);
-  mju_mulQuat(quat, quat, qrot);
   mju_normalize4(quat);
+  mju_mulQuat(quat, quat, qrot);
 }
 
 
@@ -255,7 +260,7 @@ void mju_quatZ2Vec(mjtNum quat[4], const mjtNum vec[3]) {
   mju_zero3(quat+1);
 
   // normalize vector; if too small, no rotation
-  if (mju_normalize3(vn)<mjMINVAL) {
+  if (mju_normalize3(vn) < mjMINVAL) {
     return;
   }
 
@@ -264,7 +269,7 @@ void mju_quatZ2Vec(mjtNum quat[4], const mjtNum vec[3]) {
   a = mju_normalize3(axis);
 
   // almost parallel
-  if (fabs(a)<mjMINVAL) {
+  if (mju_abs(a) < mjMINVAL) {
     // opposite: 180 deg rotation around x axis
     if (mju_dot3(vn, z) < 0) {
       quat[0] = 0;
@@ -277,6 +282,47 @@ void mju_quatZ2Vec(mjtNum quat[4], const mjtNum vec[3]) {
   // make quaternion from angle and axis
   a = mju_atan2(a, mju_dot3(vn, z));
   mju_axisAngle2Quat(quat, axis, a);
+}
+
+
+
+// extract 3D rotation from an arbitrary 3x3 matrix
+static const mjtNum rotEPS = 1e-9;
+int mju_mat2Rot(mjtNum quat[4], const mjtNum mat[9]) {
+  // Müller, Matthias, Jan Bender, Nuttapong Chentanez, and Miles Macklin. "A
+  // robust method to extract the rotational part of deformations." In
+  // Proceedings of the 9th International Conference on Motion in Games, pp.
+  // 55-60. 2016.
+
+  int iter;
+  mjtNum col1_mat[3] = {mat[0], mat[3], mat[6]};
+  mjtNum col2_mat[3] = {mat[1], mat[4], mat[7]};
+  mjtNum col3_mat[3] = {mat[2], mat[5], mat[8]};
+  for (iter = 0; iter < 500; iter++) {
+    mjtNum rot[9];
+    mju_quat2Mat(rot, quat);
+    mjtNum col1_rot[3] = {rot[0], rot[3], rot[6]};
+    mjtNum col2_rot[3] = {rot[1], rot[4], rot[7]};
+    mjtNum col3_rot[3] = {rot[2], rot[5], rot[8]};
+    mjtNum omega[3], vec1[3], vec2[3], vec3[3];
+    mju_cross(vec1, col1_rot, col1_mat);
+    mju_cross(vec2, col2_rot, col2_mat);
+    mju_cross(vec3, col3_rot, col3_mat);
+    mju_add3(omega, vec1, vec2);
+    mju_addTo3(omega, vec3);
+    mju_scl3(omega, omega, 1.0 / (mju_abs(mju_dot3(col1_rot, col1_mat) +
+                                          mju_dot3(col2_rot, col2_mat) +
+                                          mju_dot3(col3_rot, col3_mat)) + mjMINVAL));
+    mjtNum w = mju_normalize3(omega);
+    if (w < rotEPS) {
+      break;
+    }
+    mjtNum qrot[4];
+    mju_axisAngle2Quat(qrot, omega, w);
+    mju_mulQuat(quat, qrot, quat);
+    mju_normalize4(quat);
+  }
+  return iter;
 }
 
 
@@ -323,9 +369,14 @@ void mju_trnVecPose(mjtNum res[3], const mjtNum pos[3], const mjtNum quat[4], co
 
 // vector cross-product, 3D
 void mju_cross(mjtNum res[3], const mjtNum a[3], const mjtNum b[3]) {
-  res[0] = a[1]*b[2] - a[2]*b[1];
-  res[1] = a[2]*b[0] - a[0]*b[2];
-  res[2] = a[0]*b[1] - a[1]*b[0];
+  mjtNum tmp[3] = {
+    a[1]*b[2] - a[2]*b[1],
+    a[2]*b[0] - a[0]*b[2],
+    a[0]*b[1] - a[1]*b[0]
+  };
+  res[0] = tmp[0];
+  res[1] = tmp[1];
+  res[2] = tmp[2];
 }
 
 
@@ -368,8 +419,7 @@ void mju_inertCom(mjtNum res[10], const mjtNum inert[3], const mjtNum mat[9],
   // tmp = diag(inert) * mat'  (mat is local-to-global rotation)
   mjtNum tmp[9] = {mat[0]*inert[0], mat[3]*inert[0], mat[6]*inert[0],
                    mat[1]*inert[1], mat[4]*inert[1], mat[7]*inert[1],
-                   mat[2]*inert[2], mat[5]*inert[2], mat[8]*inert[2]
-                  };
+                   mat[2]*inert[2], mat[5]*inert[2], mat[8]*inert[2]};
 
   // res_rot = mat * diag(inert) * mat'
   res[0] = mat[0]*tmp[0] + mat[1]*tmp[3] + mat[2]*tmp[6];
@@ -429,9 +479,9 @@ void mju_dofCom(mjtNum res[6], const mjtNum axis[3], const mjtNum offset[3]) {
 
 // multiply dof matrix (6-by-n, transposed) by vector (n-by-1)
 void mju_mulDofVec(mjtNum* res, const mjtNum* dof, const mjtNum* vec, int n) {
-  if (n==1) {
+  if (n == 1) {
     mju_scl(res, dof, vec[0], 6);
-  } else if (n<=0) {
+  } else if (n <= 0) {
     mju_zero(res, 6);
   } else {
     mju_mulMatTVec(res, dof, vec, n, 6);
@@ -460,8 +510,8 @@ void mju_transformSpatial(mjtNum res[6], const mjtNum vec[6], int flg_force,
 
   // apply rotation if provided
   if (rotnew2old) {
-    mju_rotVecMatT(res, tran, rotnew2old);
-    mju_rotVecMatT(res+3, tran+3, rotnew2old);
+    mju_mulMatTVec3(res, rotnew2old, tran);
+    mju_mulMatTVec3(res+3, rotnew2old, tran+3);
   }
 
   // otherwise copy
@@ -478,14 +528,14 @@ void mju_makeFrame(mjtNum frame[9]) {
 
   // normalize xaxis
   if (mju_normalize3(frame) < 0.5) {
-    mju_error("xaxis of contact frame undefined");
+    mjERROR("xaxis of contact frame undefined");
   }
 
   // if yaxis undefined, set yaxis to (0,1,0) if possible, otherwise (0,0,1)
   if (mju_norm3(frame+3) < 0.5) {
     mju_zero3(frame+3);
 
-    if (frame[1]<0.5 && frame[1]>-0.5) {
+    if (frame[1] < 0.5 && frame[1] > -0.5) {
       frame[4] = 1;
     } else {
       frame[5] = 1;
@@ -499,4 +549,42 @@ void mju_makeFrame(mjtNum frame[9]) {
 
   // zaxis = cross(xaxis, yaxis)
   mju_cross(frame+6, frame, frame+3);
+}
+
+
+
+// convert sequence of Euler angles (radians) to quaternion
+// seq[0,1,2] must be in 'xyzXYZ', lower/upper-case mean intrinsic/extrinsic rotations
+void mju_euler2Quat(mjtNum quat[4], const mjtNum euler[3], const char* seq) {
+  if (strnlen(seq, 4) != 3) {
+    mjERROR("seq must contain exactly 3 characters");
+  }
+
+  // init
+  mjtNum tmp[4] = {1, 0, 0, 0};
+
+  // loop over euler angles, accumulate rotations
+  for (int i=0; i<3; i++) {
+    // construct quaternion rotation
+    mjtNum rot[4] = {cos(euler[i]/2), 0, 0, 0};
+    mjtNum sa = sin(euler[i]/2);
+    if (seq[i]=='x' || seq[i]=='X') {
+      rot[1] = sa;
+    } else if (seq[i]=='y' || seq[i]=='Y') {
+      rot[2] = sa;
+    } else if (seq[i]=='z' || seq[i]=='Z') {
+      rot[3] = sa;
+    } else {
+      mjERROR("seq[%d] is '%c', should be one of x, y, z, X, Y, Z", i, seq[i]);
+    }
+
+    // accumulate rotation
+    if (seq[i]=='x' || seq[i]=='y' || seq[i]=='z') {
+      mju_mulQuat(tmp, tmp, rot);  // moving axes: post-multiply
+    } else {
+      mju_mulQuat(tmp, rot, tmp);  // fixed axes: pre-multiply
+    }
+  }
+
+  mju_copy4(quat, tmp);
 }

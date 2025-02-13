@@ -27,8 +27,7 @@ from absl import flags
 from introspect import ast_nodes
 from . import formatter
 
-FLAGS = flags.FLAGS
-flags.DEFINE_string(
+_JSON_PATH = flags.DEFINE_string(
     'json_path', None,
     'Path to the JSON file representing the Clang AST for mujoco.h')
 
@@ -57,7 +56,10 @@ class MjEnumVisitor:
       child_kind = child.get('kind')
       if child_kind == 'EnumConstantDecl':
         next_idx = values[-1][1] + 1 if values else 0
-        value = int(child['inner'][0].get('value', next_idx))
+        if 'inner' in child:
+          value = int(child['inner'][0].get('value', next_idx))
+        else:
+          value = next_idx
         values.append((child['name'], value))
     return ast_nodes.EnumDecl(name=name, declname=name, values=dict(values))
 
@@ -85,7 +87,7 @@ def main(argv: Sequence[str]) -> None:
   if len(argv) > 1:
     raise app.UsageError('Too many command-line arguments.')
 
-  with open(FLAGS.json_path, 'r', encoding='utf-8') as f:
+  with open(_JSON_PATH.value, 'r', encoding='utf-8') as f:
     root = json.load(f)
 
   visitor = MjEnumVisitor()

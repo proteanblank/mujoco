@@ -151,7 +151,7 @@ The low-level mjvGLCamera is what determines the actual rendering. There are two
 for each eye. Each has position, forward and up directions. Forward corresponds to the negative Z axis of the camera
 frame, while up corresponds to the positive Y axis. There is also a frustum in the sense of OpenGL, except we store the
 average of the left and right frustum edges and then during rendering compute the actual edges from the viewport aspect
-ratio assuming 1:1 pixel aspect ratio. The distance between the two camera positions corresponds to the inter-pupilary
+ratio assuming 1:1 pixel aspect ratio. The distance between the two camera positions corresponds to the inter-pupillary
 distance (ipd). When the low-level camera parameters are computed automatically from an abstract camera, the ipd as well
 as vertical field of view (fovy) are taken from ``mjModel.vis.global.ipd``/``fovy`` for free and tracking cameras, and
 from the camera-specific ``mjModel.cam_ipd/fovy`` for cameras defined in the model. When stereoscopic mode is not
@@ -163,12 +163,10 @@ Selection
 '''''''''
 
 In many applications we need to click on a point and determine the 3D object to which this point/pixel belongs. This is
-done with the function :ref:`mjv_select`. Prior to MuJoCo 1.50 this function (called mjr_select) used OpenGL rendering
-in a special mode to recover the object identity and 3D position of the clicked point. Now it uses a new collision
-detection module that intersects a ray with all geoms in the model. This is actually engine-level functionality and does
-not depend on the visualizer (indeed it is also used to simulate :ref:`rangefinder <sensor-rangefinder>` sensors
-independent of visualization), but the select function is implemented in the visualizer because it needs information
-about the camera and viewport.
+done with the function :ref:`mjv_select`, which uses :ref:`ray collisions <Raycollisions>`. Ray collisions functionality
+is engine-level and does not depend on the visualizer (indeed it is also used to simulate :ref:`rangefinder
+<sensor-rangefinder>` sensors independent of visualization), but the select function is implemented in the visualizer
+because it needs information about the camera and viewport.
 
 The function mjv_select returns the index of the geom at the specified window coordinates, or -1 if there is no geom
 at those coordinates. The 3D position is also returned. See the code sample :ref:`simulate.cc <saSimulate>` for an

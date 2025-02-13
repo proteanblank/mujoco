@@ -62,7 +62,7 @@ public class MjScene : MonoBehaviour {
       return _instance;
     }
   }
-  
+
   public static bool InstanceExists { get => _instance != null; }
 
   public void Awake() {
@@ -78,11 +78,11 @@ public class MjScene : MonoBehaviour {
 
   private List<MjComponent> _orderedComponents;
 
-  public EventHandler<MjStepArgs> postInitEvent;
-  public EventHandler preUpdateEvent;
-  public EventHandler<MjStepArgs> ctrlCallback;
-  public EventHandler postUpdateEvent;
-  public EventHandler<MjStepArgs> preDestroyEvent;
+  public event EventHandler<MjStepArgs> postInitEvent;
+  public event EventHandler<MjStepArgs> preUpdateEvent;
+  public event EventHandler<MjStepArgs> ctrlCallback;
+  public event EventHandler<MjStepArgs> postUpdateEvent;
+  public event EventHandler<MjStepArgs> preDestroyEvent;
 
   protected unsafe void Start() {
     SceneRecreationAtLateUpdateRequested = false;
@@ -94,9 +94,9 @@ public class MjScene : MonoBehaviour {
   }
 
   protected unsafe void FixedUpdate() {
-    preUpdateEvent?.Invoke(this, EventArgs.Empty);
+    preUpdateEvent?.Invoke(this, new MjStepArgs(Model, Data));
     StepScene();
-    postUpdateEvent?.Invoke(this, EventArgs.Empty);
+    postUpdateEvent?.Invoke(this, new MjStepArgs(Model, Data));
   }
 
   public bool SceneRecreationAtLateUpdateRequested = false;
@@ -178,12 +178,12 @@ public class MjScene : MonoBehaviour {
       XmlDocument mjcf, IEnumerable<MjComponent> components) {
     Model = MjEngineTool.LoadModelFromString(mjcf.OuterXml);
     if (Model == null) {
-      throw new NullReferenceException("Failed to create Mujoco runtime model.");
+      throw new NullReferenceException("Model loading failed, see other errors for root cause.");
     } else {
       Data = MujocoLib.mj_makeData(Model);
     }
     if (Data == null) {
-      throw new NullReferenceException("Failed to create Mujoco runtime data.");
+      throw new NullReferenceException("Model loaded but mj_makeData failed.");
     }
 
     // Bind the components to their Mujoco counterparts.
@@ -472,18 +472,15 @@ public class MjScene : MonoBehaviour {
       Debug.LogWarning("Failed to save Xml to a file: " + ex.ToString(), this);
     }
   }
-
-
 }
 
-  public class MjStepArgs : EventArgs
-  {
-    public unsafe MjStepArgs(MujocoLib.mjModel_* model, MujocoLib.mjData_* data){
-      this.model = model; 
-      this.data = data;
-    }
-    public readonly unsafe MujocoLib.mjModel_* model;
-    public readonly unsafe MujocoLib.mjData_* data;
+public class MjStepArgs : EventArgs
+{
+  public unsafe MjStepArgs(MujocoLib.mjModel_* model, MujocoLib.mjData_* data){
+    this.model = model;
+    this.data = data;
   }
-
+  public readonly unsafe MujocoLib.mjModel_* model;
+  public readonly unsafe MujocoLib.mjData_* data;
+}
 }
