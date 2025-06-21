@@ -248,6 +248,26 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Compile spec to model.',
      )),
+    ('mj_copyBack',
+     FunctionDecl(
+         name='mj_copyBack',
+         return_type=ValueType(name='int'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='s',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjSpec'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='m',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjModel', is_const=True),
+                 ),
+             ),
+         ),
+         doc='Copy real-valued arrays from model to spec, returns 1 on success.',  # pylint: disable=line-too-long
+     )),
     ('mj_recompile',
      FunctionDecl(
          name='mj_recompile',
@@ -1828,6 +1848,26 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
          ),
          doc='Run composite rigid body inertia algorithm (CRB).',
+     )),
+    ('mj_makeM',
+     FunctionDecl(
+         name='mj_makeM',
+         return_type=ValueType(name='void'),
+         parameters=(
+             FunctionParameterDecl(
+                 name='m',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjModel', is_const=True),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='d',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjData'),
+                 ),
+             ),
+         ),
+         doc='Make inertia matrix.',
      )),
     ('mj_factorM',
      FunctionDecl(
@@ -8947,45 +8987,25 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          ),
          doc='Attach child to a parent, return the attached element if success or NULL otherwise.',  # pylint: disable=line-too-long
      )),
-    ('mjs_detachBody',
+    ('mjs_detach',
      FunctionDecl(
-         name='mjs_detachBody',
+         name='mjs_detach',
          return_type=ValueType(name='int'),
          parameters=(
              FunctionParameterDecl(
-                 name='s',
+                 name='spec',
                  type=PointerType(
                      inner_type=ValueType(name='mjSpec'),
                  ),
              ),
              FunctionParameterDecl(
-                 name='b',
+                 name='element',
                  type=PointerType(
-                     inner_type=ValueType(name='mjsBody'),
+                     inner_type=ValueType(name='mjsElement'),
                  ),
              ),
          ),
-         doc='Delete body and descendants from mjSpec, remove all references, return 0 on success.',  # pylint: disable=line-too-long
-     )),
-    ('mjs_detachDefault',
-     FunctionDecl(
-         name='mjs_detachDefault',
-         return_type=ValueType(name='int'),
-         parameters=(
-             FunctionParameterDecl(
-                 name='s',
-                 type=PointerType(
-                     inner_type=ValueType(name='mjSpec'),
-                 ),
-             ),
-             FunctionParameterDecl(
-                 name='d',
-                 type=PointerType(
-                     inner_type=ValueType(name='mjsDefault'),
-                 ),
-             ),
-         ),
-         doc='Delete default class and descendants from mjSpec, remove all references, return 0 on success.',  # pylint: disable=line-too-long
+         doc='Detach but not delete object corresponding to the given element, return 0 on success.',  # pylint: disable=line-too-long
      )),
     ('mjs_addBody',
      FunctionDecl(
@@ -9162,6 +9182,12 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
          name='mjs_delete',
          return_type=ValueType(name='int'),
          parameters=(
+             FunctionParameterDecl(
+                 name='spec',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjSpec'),
+                 ),
+             ),
              FunctionParameterDecl(
                  name='element',
                  type=PointerType(
@@ -9510,6 +9536,266 @@ FUNCTIONS: Mapping[str, FunctionDecl] = dict([
              ),
          ),
          doc='Add default.',
+     )),
+    ('mjs_setToMotor',
+     FunctionDecl(
+         name='mjs_setToMotor',
+         return_type=PointerType(
+             inner_type=ValueType(name='char', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='actuator',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsActuator'),
+                 ),
+             ),
+         ),
+         doc='Set actuator to motor, return error if any.',
+     )),
+    ('mjs_setToPosition',
+     FunctionDecl(
+         name='mjs_setToPosition',
+         return_type=PointerType(
+             inner_type=ValueType(name='char', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='actuator',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsActuator'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='kp',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='kv',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(1,),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='dampratio',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(1,),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='timeconst',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(1,),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='inheritrange',
+                 type=ValueType(name='double'),
+             ),
+         ),
+         doc='Set actuator to position, return error if any.',
+     )),
+    ('mjs_setToIntVelocity',
+     FunctionDecl(
+         name='mjs_setToIntVelocity',
+         return_type=PointerType(
+             inner_type=ValueType(name='char', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='actuator',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsActuator'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='kp',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='kv',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(1,),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='dampratio',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(1,),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='timeconst',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(1,),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='inheritrange',
+                 type=ValueType(name='double'),
+             ),
+         ),
+         doc='Set actuator to integrated velocity, return error if any.',
+     )),
+    ('mjs_setToVelocity',
+     FunctionDecl(
+         name='mjs_setToVelocity',
+         return_type=PointerType(
+             inner_type=ValueType(name='char', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='actuator',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsActuator'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='kv',
+                 type=ValueType(name='double'),
+             ),
+         ),
+         doc='Set actuator to velocity servo, return error if any.',
+     )),
+    ('mjs_setToDamper',
+     FunctionDecl(
+         name='mjs_setToDamper',
+         return_type=PointerType(
+             inner_type=ValueType(name='char', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='actuator',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsActuator'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='kv',
+                 type=ValueType(name='double'),
+             ),
+         ),
+         doc='Set actuator to activate damper, return error if any.',
+     )),
+    ('mjs_setToCylinder',
+     FunctionDecl(
+         name='mjs_setToCylinder',
+         return_type=PointerType(
+             inner_type=ValueType(name='char', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='actuator',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsActuator'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='timeconst',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='bias',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='area',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='diameter',
+                 type=ValueType(name='double'),
+             ),
+         ),
+         doc='Set actuator to hydraulic or pneumatic cylinder, return error if any.',  # pylint: disable=line-too-long
+     )),
+    ('mjs_setToMuscle',
+     FunctionDecl(
+         name='mjs_setToMuscle',
+         return_type=PointerType(
+             inner_type=ValueType(name='char', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='actuator',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsActuator'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='timeconst',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(2,),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='tausmooth',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='range',
+                 type=ArrayType(
+                     inner_type=ValueType(name='double'),
+                     extents=(2,),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='force',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='scale',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='lmin',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='lmax',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='vmax',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='fpmax',
+                 type=ValueType(name='double'),
+             ),
+             FunctionParameterDecl(
+                 name='fvmax',
+                 type=ValueType(name='double'),
+             ),
+         ),
+         doc='Set actuator to muscle, return error if any.a',
+     )),
+    ('mjs_setToAdhesion',
+     FunctionDecl(
+         name='mjs_setToAdhesion',
+         return_type=PointerType(
+             inner_type=ValueType(name='char', is_const=True),
+         ),
+         parameters=(
+             FunctionParameterDecl(
+                 name='actuator',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjsActuator'),
+                 ),
+             ),
+             FunctionParameterDecl(
+                 name='gain',
+                 type=ValueType(name='double'),
+             ),
+         ),
+         doc='Set actuator to active adhesion, return error if any.',
      )),
     ('mjs_addMesh',
      FunctionDecl(

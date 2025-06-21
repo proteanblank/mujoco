@@ -792,12 +792,14 @@ has any effect. The settings here are global and apply to the entire model.
 
 :at:`fusestatic`: :at-val:`[false, true], "false" for MJCF, "true" for URDF`
    This attribute controls a compiler optimization feature where static bodies are fused with their parent, and any
-   elements defined in those bodies are reassigned to the parent. This feature can only be used in models which do not
-   have elements capable of named references inside the kinematic tree - namely skins, contact pairs, excludes, tendons,
-   actuators, sensors, tuples, cameras, lights. If a model has any these elements, fusestatic does nothing even if
-   enabled. This optimization is particularly useful when importing URDF models which often have many dummy bodies, but
-   can also be used to optimize MJCF models. After optimization, the new model has identical kinematics and dynamics as
-   the original but is faster to simulate.
+   elements defined in those bodies are reassigned to the parent. Static bodies are fused with their parent unless
+
+   - They are referenced by another element in the model.
+   - They contain a site which is referenced by a :ref:`force<sensor-force>` or :ref:`torque<sensor-torque>` sensor.
+
+   This optimization is particularly useful when importing URDF models which often have many dummy bodies, but can also
+   be used to optimize MJCF models. After optimization, the new model has identical kinematics and dynamics as the
+   original but is faster to simulate.
 
 .. _compiler-inertiafromgeom:
 
@@ -1776,15 +1778,19 @@ properties are grouped together.
 
 .. _asset-material-metallic:
 
-:at:`metallic`: :at-val:`real, "0"`
+:at:`metallic`: :at-val:`real, "-1"`
    This attribute corresponds to uniform metallicity coefficient applied to the entire material. This attribute has no
-   effect in MuJoCo's native renderer, but it can be useful when rendering scenes with an external renderer.
+   effect in MuJoCo's native renderer, but it can be useful when rendering scenes with a physically-based renderer. In
+   this case, if a non-negative value is specified, this metallic value should be multiplied by the metallic texture
+   sampled value to obtain the final metallicity of the material.
 
 .. _asset-material-roughness:
 
-:at:`roughness`: :at-val:`real, "1"`
+:at:`roughness`: :at-val:`real, "-1"`
    This attribute corresponds to uniform roughness coefficient applied to the entire material. This attribute has no
-   effect in MuJoCo's native renderer, but it can be useful when rendering scenes with an external renderer.
+   effect in MuJoCo's native renderer, but it can be useful when rendering scenes with a physically-based renderer. In
+   this case, if a non-negative value is specified, this roughness value should be multiplied by the roughness texture
+   sampled value to obtain the final roughness of the material.
 
 .. _asset-material-rgba:
 
@@ -2918,8 +2924,8 @@ Attributes may be applied or ignored depending on the lighting model being used.
 .. _body-light-directional:
 
 :at:`directional`: :at-val:`[false, true], "false"`
-   This is a deprecated legacy attribute. Please use :ref:`light <light-type>` type instead. If set to "true", and no
-   type is specified, this will change the light type to be directional.
+   This is a deprecated legacy attribute. Please use :ref:`light <body-light-type>` type instead. If set to "true", and
+   no type is specified, this will change the light type to be directional.
 
 .. _body-light-castshadow:
 
@@ -2961,9 +2967,14 @@ Attributes may be applied or ignored depending on the lighting model being used.
    The color of the light. For the Phong (default) lighting model, this defines the diffuse color of
    the light.
 
+.. _body-light-texture:
+
+:at:`texture`: :at-val:`string, optional`
+   The texture to use for image-based lighting. This is unused by the default Phong lighting model.
+
 .. _body-light-intensity:
 
-:at:`intensity`: :at-val:`real, "1000.0"`
+:at:`intensity`: :at-val:`real, "0.0"`
    The intensity of the light source, measured in candela, used for physically-based lighting models.
    This is unused by the default Phong lighting model.
 
@@ -7522,6 +7533,12 @@ coordinated visual settings corresponding to a "theme", and then include this fi
 
 While all settings in mjVisual are global, the settings here could not be fit into any of the other subsections. So this
 is effectively a miscellaneous subsection.
+
+.. _visual-global-cameraid:
+
+:at:`cameraid`: :at-val:`int, "-1"`
+   The id of the camera used when initially loading the model in the visualizer. The default value of -1 means the free
+   camera. In order to specify a :ref:`modeled camera<body-camera>`, use the camera's id as given by :ref:`mj_name2id`.
 
 .. _visual-global-orthographic:
 

@@ -16,7 +16,7 @@
 #define MUJOCO_MUJOCO_H_
 
 // header version; should match the library version as returned by mj_version()
-#define mjVERSION_HEADER 333
+#define mjVERSION_HEADER 334
 
 // needed to define size_t, fabs and log10
 #include <stdlib.h>
@@ -106,6 +106,9 @@ MJAPI mjSpec* mj_parseXMLString(const char* xml, const mjVFS* vfs, char* error, 
 
 // Compile spec to model.
 MJAPI mjModel* mj_compile(mjSpec* s, const mjVFS* vfs);
+
+// Copy real-valued arrays from model to spec, returns 1 on success.
+MJAPI int mj_copyBack(mjSpec* s, const mjModel* m);
 
 // Recompile spec to model, preserving the state, return 0 on success.
 MJAPI int mj_recompile(mjSpec* s, const mjVFS* vfs, mjModel* m, mjData* d);
@@ -363,6 +366,9 @@ MJAPI void mj_transmission(const mjModel* m, mjData* d);
 
 // Run composite rigid body inertia algorithm (CRB).
 MJAPI void mj_crb(const mjModel* m, mjData* d);
+
+// Make inertia matrix.
+MJAPI void mj_makeM(const mjModel* m, mjData* d);
 
 // Compute sparse L'*D*L factorizaton of inertia matrix.
 MJAPI void mj_factorM(const mjModel* m, mjData* d);
@@ -1405,11 +1411,8 @@ MJAPI void mju_taskJoin(mjTask* task);
 MJAPI mjsElement* mjs_attach(mjsElement* parent, const mjsElement* child,
                              const char* prefix, const char* suffix);
 
-// Delete body and descendants from mjSpec, remove all references, return 0 on success.
-MJAPI int mjs_detachBody(mjSpec* s, mjsBody* b);
-
-// Delete default class and descendants from mjSpec, remove all references, return 0 on success.
-MJAPI int mjs_detachDefault(mjSpec* s, mjsDefault* d);
+// Detach but not delete object corresponding to the given element, return 0 on success.
+MJAPI int mjs_detach(mjSpec* spec, mjsElement* element);
 
 //---------------------------------- Tree elements -------------------------------------------------
 
@@ -1438,7 +1441,7 @@ MJAPI mjsLight* mjs_addLight(mjsBody* body, const mjsDefault* def);
 MJAPI mjsFrame* mjs_addFrame(mjsBody* body, mjsFrame* parentframe);
 
 // Delete object corresponding to the given element, return 0 on success.
-MJAPI int mjs_delete(mjsElement* element);
+MJAPI int mjs_delete(mjSpec* spec, mjsElement* element);
 
 
 //---------------------------------- Non-tree elements ---------------------------------------------
@@ -1493,6 +1496,38 @@ MJAPI mjsPlugin* mjs_addPlugin(mjSpec* s);
 
 // Add default.
 MJAPI mjsDefault* mjs_addDefault(mjSpec* s, const char* classname, const mjsDefault* parent);
+
+
+//---------------------------------- Set actuator parameters ---------------------------------------
+
+// Set actuator to motor, return error if any.
+MJAPI const char* mjs_setToMotor(mjsActuator* actuator);
+
+// Set actuator to position, return error if any.
+MJAPI const char* mjs_setToPosition(mjsActuator* actuator, double kp, double kv[1],
+                                    double dampratio[1], double timeconst[1], double inheritrange);
+
+// Set actuator to integrated velocity, return error if any.
+MJAPI const char* mjs_setToIntVelocity(mjsActuator* actuator, double kp, double kv[1],
+                                       double dampratio[1], double timeconst[1], double inheritrange);
+
+// Set actuator to velocity servo, return error if any.
+MJAPI const char* mjs_setToVelocity(mjsActuator* actuator, double kv);
+
+// Set actuator to activate damper, return error if any.
+MJAPI const char* mjs_setToDamper(mjsActuator* actuator, double kv);
+
+// Set actuator to hydraulic or pneumatic cylinder, return error if any.
+MJAPI const char* mjs_setToCylinder(mjsActuator* actuator, double timeconst,
+                                    double bias, double area, double diameter);
+
+// Set actuator to muscle, return error if any.a
+MJAPI const char* mjs_setToMuscle(mjsActuator* actuator, double timeconst[2], double tausmooth,
+                                  double range[2], double force, double scale, double lmin,
+                                  double lmax, double vmax, double fpmax, double fvmax);
+
+// Set actuator to active adhesion, return error if any.
+MJAPI const char* mjs_setToAdhesion(mjsActuator* actuator, double gain);
 
 
 //---------------------------------- Assets --------------------------------------------------------

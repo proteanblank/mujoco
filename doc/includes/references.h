@@ -267,7 +267,7 @@ struct mjData_ {
   int*    moment_colind;     // column indices in sparse Jacobian                (nJmom x 1)
   mjtNum* actuator_moment;   // actuator moments                                 (nJmom x 1)
 
-  // computed by mj_fwdPosition/mj_crb
+  // computed by mj_fwdPosition/mj_makeM
   mjtNum* crb;               // com-based composite inertia and mass             (nbody x 10)
   mjtNum* qM;                // inertia (sparse)                                 (nM x 1)
   mjtNum* M;                 // reduced inertia (compressed sparse row)          (nC x 1)
@@ -795,8 +795,8 @@ struct mjLROpt_ {                 // options for mj_setLengthRange()
   mjtNum tolrange;                // convergence tolerance (relative to range)
 };
 typedef struct mjLROpt_ mjLROpt;
-struct mjVFS_ {                               // virtual file system for loading from memory
-  void* impl_;                                // internal pointer to VFS memory
+struct mjVFS_ {                   // virtual file system for loading from memory
+  void* impl_;                    // internal pointer to VFS memory
 };
 typedef struct mjVFS_ mjVFS;
 struct mjOption_ {                // physics options
@@ -844,7 +844,8 @@ struct mjOption_ {                // physics options
 typedef struct mjOption_ mjOption;
 struct mjVisual_ {                // visualization options
   struct {                        // global parameters
-    int orthographic;             // is the free camera orthographic (0: no, 1: yes)
+    int   cameraid;               // initial camera id (-1: free)
+    int   orthographic;           // is the free camera orthographic (0: no, 1: yes)
     float fovy;                   // y field-of-view of free camera (orthographic ? length : degree)
     float ipd;                    // inter-pupilary distance for free camera
     float azimuth;                // initial azimuth of free camera (degrees)
@@ -1186,6 +1187,7 @@ struct mjModel_ {
   int*      light_bodyid;         // id of light's body                       (nlight x 1)
   int*      light_targetbodyid;   // id of targeted body; -1: none            (nlight x 1)
   int*      light_type;           // spot, directional, etc. (mjtLightType)   (nlight x 1)
+  int*      light_texid;          // texture id for image lights              (nlight x 1)
   mjtByte*  light_castshadow;     // does light cast shadows                  (nlight x 1)
   float*    light_bulbradius;     // light radius for soft shadows            (nlight x 1)
   float*    light_intensity;      // intensity, in candela                    (nlight x 1)
@@ -2043,6 +2045,7 @@ typedef struct mjsLight_ {         // light specification
   // intrinsics
   mjtByte active;                  // is light active
   mjtLightType type;               // type of light
+  mjString* texture;               // texture name for image lights
   mjtByte castshadow;              // does light cast shadows
   float bulbradius;                // bulb radius, for soft shadows
   float intensity;                 // intensity, in candelas
@@ -2815,7 +2818,7 @@ typedef struct mjvGLCamera_ mjvGLCamera;
 struct mjvGeom_ {                 // abstract geom
   // type info
   int      type;                  // geom type (mjtGeom)
-  int      dataid;                // mesh, hfield or plane id; -1: none
+  int      dataid;                // mesh, hfield or plane id; -1: none; mesh: 2*id or 2*id+1 (hull)
   int      objtype;               // mujoco object type; mjOBJ_UNKNOWN for decor
   int      objid;                 // mujoco object id; -1 for decor
   int      category;              // visual category
@@ -2847,6 +2850,7 @@ struct mjvLight_ {                // OpenGL light
   float    pos[3];                // position rel. to body frame
   float    dir[3];                // direction rel. to body frame
   int      type;                  // type (mjtLightType)
+  int      texid;                 // texture id for image lights
   float    attenuation[3];        // OpenGL attenuation (quadratic model)
   float    cutoff;                // OpenGL cutoff
   float    exponent;              // OpenGL exponent
@@ -2989,6 +2993,7 @@ mjModel* mj_loadXML(const char* filename, const mjVFS* vfs, char* error, int err
 mjSpec* mj_parseXML(const char* filename, const mjVFS* vfs, char* error, int error_sz);
 mjSpec* mj_parseXMLString(const char* xml, const mjVFS* vfs, char* error, int error_sz);
 mjModel* mj_compile(mjSpec* s, const mjVFS* vfs);
+int mj_copyBack(mjSpec* s, const mjModel* m);
 int mj_recompile(mjSpec* s, const mjVFS* vfs, mjModel* m, mjData* d);
 int mj_saveLastXML(const char* filename, const mjModel* m, char* error, int error_sz);
 void mj_freeLastXML(void);
@@ -3068,6 +3073,7 @@ void mj_flex(const mjModel* m, mjData* d);
 void mj_tendon(const mjModel* m, mjData* d);
 void mj_transmission(const mjModel* m, mjData* d);
 void mj_crb(const mjModel* m, mjData* d);
+void mj_makeM(const mjModel* m, mjData* d);
 void mj_factorM(const mjModel* m, mjData* d);
 void mj_solveM(const mjModel* m, mjData* d, mjtNum* x, const mjtNum* y, int n);
 void mj_solveM2(const mjModel* m, mjData* d, mjtNum* x, const mjtNum* y,
@@ -3405,8 +3411,7 @@ void mju_defaultTask(mjTask* task);
 void mju_taskJoin(mjTask* task);
 mjsElement* mjs_attach(mjsElement* parent, const mjsElement* child,
                        const char* prefix, const char* suffix);
-int mjs_detachBody(mjSpec* s, mjsBody* b);
-int mjs_detachDefault(mjSpec* s, mjsDefault* d);
+int mjs_detach(mjSpec* spec, mjsElement* element);
 mjsBody* mjs_addBody(mjsBody* body, const mjsDefault* def);
 mjsSite* mjs_addSite(mjsBody* body, const mjsDefault* def);
 mjsJoint* mjs_addJoint(mjsBody* body, const mjsDefault* def);
@@ -3415,7 +3420,7 @@ mjsGeom* mjs_addGeom(mjsBody* body, const mjsDefault* def);
 mjsCamera* mjs_addCamera(mjsBody* body, const mjsDefault* def);
 mjsLight* mjs_addLight(mjsBody* body, const mjsDefault* def);
 mjsFrame* mjs_addFrame(mjsBody* body, mjsFrame* parentframe);
-int mjs_delete(mjsElement* element);
+int mjs_delete(mjSpec* spec, mjsElement* element);
 mjsActuator* mjs_addActuator(mjSpec* s, const mjsDefault* def);
 mjsSensor* mjs_addSensor(mjSpec* s);
 mjsFlex* mjs_addFlex(mjSpec* s);
@@ -3433,6 +3438,19 @@ mjsTuple* mjs_addTuple(mjSpec* s);
 mjsKey* mjs_addKey(mjSpec* s);
 mjsPlugin* mjs_addPlugin(mjSpec* s);
 mjsDefault* mjs_addDefault(mjSpec* s, const char* classname, const mjsDefault* parent);
+const char* mjs_setToMotor(mjsActuator* actuator);
+const char* mjs_setToPosition(mjsActuator* actuator, double kp, double kv[1],
+                              double dampratio[1], double timeconst[1], double inheritrange);
+const char* mjs_setToIntVelocity(mjsActuator* actuator, double kp, double kv[1],
+                                 double dampratio[1], double timeconst[1], double inheritrange);
+const char* mjs_setToVelocity(mjsActuator* actuator, double kv);
+const char* mjs_setToDamper(mjsActuator* actuator, double kv);
+const char* mjs_setToCylinder(mjsActuator* actuator, double timeconst,
+                              double bias, double area, double diameter);
+const char* mjs_setToMuscle(mjsActuator* actuator, double timeconst[2], double tausmooth,
+                            double range[2], double force, double scale, double lmin,
+                            double lmax, double vmax, double fpmax, double fvmax);
+const char* mjs_setToAdhesion(mjsActuator* actuator, double gain);
 mjsMesh* mjs_addMesh(mjSpec* s, const mjsDefault* def);
 mjsHField* mjs_addHField(mjSpec* s);
 mjsSkin* mjs_addSkin(mjSpec* s);

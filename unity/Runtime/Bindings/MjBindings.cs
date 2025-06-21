@@ -110,7 +110,7 @@ public const int mjMAXLINEPNT = 1000;
 public const int mjMAXPLANEGRID = 200;
 public const bool THIRD_PARTY_MUJOCO_MJXMACRO_H_ = true;
 public const bool THIRD_PARTY_MUJOCO_MUJOCO_H_ = true;
-public const int mjVERSION_HEADER = 333;
+public const int mjVERSION_HEADER = 334;
 
 
 // ------------------------------------Enums------------------------------------
@@ -5114,6 +5114,7 @@ public unsafe struct mjOption_ {
 
 [StructLayout(LayoutKind.Sequential)]
 public unsafe struct global {
+  public int cameraid;
   public int orthographic;
   public float fovy;
   public float ipd;
@@ -5441,6 +5442,7 @@ public unsafe struct mjModel_ {
   public int* light_bodyid;
   public int* light_targetbodyid;
   public int* light_type;
+  public int* light_texid;
   public byte* light_castshadow;
   public float* light_bulbradius;
   public float* light_intensity;
@@ -6082,6 +6084,7 @@ public unsafe struct mjvLight_ {
   public fixed float pos[3];
   public fixed float dir[3];
   public int type;
+  public int texid;
   public fixed float attenuation[3];
   public float cutoff;
   public float exponent;
@@ -6510,6 +6513,9 @@ public static unsafe extern void mj_transmission(mjModel_* m, mjData_* d);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mj_crb(mjModel_* m, mjData_* d);
+
+[DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
+public static unsafe extern void mj_makeM(mjModel_* m, mjData_* d);
 
 [DllImport("mujoco", CallingConvention = CallingConvention.Cdecl)]
 public static unsafe extern void mj_factorM(mjModel_* m, mjData_* d);
