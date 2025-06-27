@@ -17,11 +17,16 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "src/experimental/usd/mjcPhysics/sceneAPI.h"
-#include "src/experimental/usd/mjcPhysics/siteAPI.h"
-#include "src/experimental/usd/mjcPhysics/tokens.h"
+#include <mujoco/experimental/usd/mjcPhysics/actuatorAPI.h>
+#include <mujoco/experimental/usd/mjcPhysics/collisionAPI.h>
+#include <mujoco/experimental/usd/mjcPhysics/meshCollisionAPI.h>
+#include <mujoco/experimental/usd/mjcPhysics/sceneAPI.h>
+#include <mujoco/experimental/usd/mjcPhysics/siteAPI.h>
+#include <mujoco/experimental/usd/mjcPhysics/tokens.h>
 #include "test/experimental/usd/test_utils.h"
 #include "test/fixture.h"
+#include <pxr/base/gf/quatf.h>
+#include <pxr/base/gf/rotation.h>
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec3f.h>
@@ -29,15 +34,18 @@
 #include <pxr/base/tf/staticTokens.h>
 #include <pxr/base/tf/token.h>
 #include <pxr/base/vt/array.h>
+#include <pxr/base/vt/types.h>
 #include <pxr/pxr.h>
 #include <pxr/usd/kind/registry.h>
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/declareHandles.h>
 #include <pxr/usd/sdf/fileFormat.h>
 #include <pxr/usd/sdf/path.h>
+#include <pxr/usd/sdf/schema.h>
 #include <pxr/usd/usd/common.h>
 #include <pxr/usd/usd/modelAPI.h>
 #include <pxr/usd/usd/prim.h>
+#include <pxr/usd/usd/primRange.h>  // IWYU pragma: keep, used for TraverseAll
 #include <pxr/usd/usd/stage.h>
 #include <pxr/usd/usdGeom/capsule.h>
 #include <pxr/usd/usdGeom/cube.h>
@@ -50,7 +58,12 @@
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdPhysics/articulationRootAPI.h>
 #include <pxr/usd/usdPhysics/collisionAPI.h>
+#include <pxr/usd/usdPhysics/fixedJoint.h>
+#include <pxr/usd/usdPhysics/joint.h>
+#include <pxr/usd/usdPhysics/massAPI.h>
 #include <pxr/usd/usdPhysics/meshCollisionAPI.h>
+#include <pxr/usd/usdPhysics/prismaticJoint.h>
+#include <pxr/usd/usdPhysics/revoluteJoint.h>
 #include <pxr/usd/usdPhysics/rigidBodyAPI.h>
 #include <pxr/usd/usdPhysics/scene.h>
 #include <pxr/usd/usdPhysics/tokens.h>
@@ -136,20 +149,122 @@ TEST_F(MjcfSdfFileFormatPluginTest, TestMaterials) {
       stage,
       "/mesh_test/Materials/material_red/PreviewSurface.inputs:diffuseColor",
       pxr::GfVec3f(0.8, 0, 0));
+  ExpectAttributeHasConnection(
+      stage, "/mesh_test/Materials/material_red.outputs:surface",
+      "/mesh_test/Materials/material_red/PreviewSurface.outputs:surface");
+  ExpectAttributeHasConnection(
+      stage, "/mesh_test/Materials/material_red.outputs:displacement",
+      "/mesh_test/Materials/material_red/PreviewSurface.outputs:displacement");
 
   EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_texture");
   EXPECT_PRIM_VALID(stage,
                     "/mesh_test/Materials/material_texture/PreviewSurface");
   EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_texture/uvmap");
-  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_texture/texture");
+  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_texture/diffuse");
   ExpectAttributeHasConnection(
       stage,
       "/mesh_test/Materials/material_texture/"
       "PreviewSurface.inputs:diffuseColor",
-      "/mesh_test/Materials/material_texture/texture.outputs:rgb");
+      "/mesh_test/Materials/material_texture/diffuse.outputs:rgb");
   ExpectAttributeEqual(
-      stage, "/mesh_test/Materials/material_texture/texture.inputs:file",
+      stage, "/mesh_test/Materials/material_texture/diffuse.inputs:file",
       pxr::SdfAssetPath("textures/cube.png"));
+
+  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_metallic");
+  EXPECT_PRIM_VALID(stage,
+                    "/mesh_test/Materials/material_metallic/PreviewSurface");
+  ExpectAttributeEqual(
+      stage,
+      "/mesh_test/Materials/material_metallic/PreviewSurface.inputs:metallic",
+      0.6f);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestMaterialLayers) {
+  const std::string xml_path = GetTestDataFilePath(kMaterialsPath);
+  auto stage = pxr::UsdStage::Open(xml_path);
+  EXPECT_THAT(stage, testing::NotNull());
+
+  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_layered");
+  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_layered/uvmap");
+  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_layered/diffuse");
+
+  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_layered/normal");
+  ExpectAttributeHasConnection(
+      stage,
+      "/mesh_test/Materials/material_layered/"
+      "PreviewSurface.inputs:normal",
+      "/mesh_test/Materials/material_layered/normal.outputs:rgb");
+  ExpectAttributeEqual(
+      stage, "/mesh_test/Materials/material_layered/normal.inputs:file",
+      pxr::SdfAssetPath("textures/normal.png"));
+
+  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_layered/orm_packed");
+  ExpectAttributeHasConnection(
+      stage,
+      "/mesh_test/Materials/material_layered/"
+      "PreviewSurface.inputs:occlusion",
+      "/mesh_test/Materials/material_layered/orm_packed.outputs:r");
+  ExpectAttributeHasConnection(
+      stage,
+      "/mesh_test/Materials/material_layered/"
+      "PreviewSurface.inputs:roughness",
+      "/mesh_test/Materials/material_layered/orm_packed.outputs:g");
+  ExpectAttributeHasConnection(
+      stage,
+      "/mesh_test/Materials/material_layered/"
+      "PreviewSurface.inputs:metallic",
+      "/mesh_test/Materials/material_layered/orm_packed.outputs:b");
+  ExpectAttributeEqual(
+      stage, "/mesh_test/Materials/material_layered/orm_packed.inputs:file",
+      pxr::SdfAssetPath("textures/orm.png"));
+
+  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_layered/emissive");
+  ExpectAttributeHasConnection(
+      stage,
+      "/mesh_test/Materials/material_layered/"
+      "PreviewSurface.inputs:emissiveColor",
+      "/mesh_test/Materials/material_layered/emissive.outputs:rgb");
+  ExpectAttributeEqual(
+      stage, "/mesh_test/Materials/material_layered/emissive.inputs:file",
+      pxr::SdfAssetPath("textures/emissive.png"));
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestMaterialPBRSeparate) {
+  const std::string xml_path = GetTestDataFilePath(kMaterialsPath);
+  auto stage = pxr::UsdStage::Open(xml_path);
+
+  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_pbr_separate");
+  EXPECT_PRIM_VALID(stage, "/mesh_test/Materials/material_pbr_separate/uvmap");
+  EXPECT_PRIM_VALID(stage,
+                    "/mesh_test/Materials/material_pbr_separate/occlusion");
+  ExpectAttributeHasConnection(
+      stage,
+      "/mesh_test/Materials/material_pbr_separate/"
+      "PreviewSurface.inputs:occlusion",
+      "/mesh_test/Materials/material_pbr_separate/occlusion.outputs:rgb");
+  ExpectAttributeEqual(
+      stage, "/mesh_test/Materials/material_pbr_separate/occlusion.inputs:file",
+      pxr::SdfAssetPath("textures/occlusion.png"));
+  EXPECT_PRIM_VALID(stage,
+                    "/mesh_test/Materials/material_pbr_separate/roughness");
+  ExpectAttributeHasConnection(
+      stage,
+      "/mesh_test/Materials/material_pbr_separate/"
+      "PreviewSurface.inputs:roughness",
+      "/mesh_test/Materials/material_pbr_separate/roughness.outputs:rgb");
+  ExpectAttributeEqual(
+      stage, "/mesh_test/Materials/material_pbr_separate/roughness.inputs:file",
+      pxr::SdfAssetPath("textures/roughness.png"));
+  EXPECT_PRIM_VALID(stage,
+                    "/mesh_test/Materials/material_pbr_separate/metallic");
+  ExpectAttributeHasConnection(
+      stage,
+      "/mesh_test/Materials/material_pbr_separate/"
+      "PreviewSurface.inputs:metallic",
+      "/mesh_test/Materials/material_pbr_separate/metallic.outputs:rgb");
+  ExpectAttributeEqual(
+      stage, "/mesh_test/Materials/material_pbr_separate/metallic.inputs:file",
+      pxr::SdfAssetPath("textures/metallic.png"));
 }
 
 TEST_F(MjcfSdfFileFormatPluginTest, TestGeomRgba) {
@@ -445,6 +560,30 @@ TEST_F(MjcfSdfFileFormatPluginTest, TestKindAuthoring) {
   EXPECT_PRIM_KIND(stage, "/test/root/middle", pxr::KindTokens->subcomponent);
   EXPECT_PRIM_KIND(stage, "/test/root/middle/tet",
                    pxr::KindTokens->subcomponent);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestAttributesMatchSchemaTypes) {
+  // TODO(robinalazard): Make the scene much more comprehensive. We ideally want
+  // to test all the prims that the plugin can generate.
+  static constexpr char kXml[] = R"(
+    <mujoco model="test">
+      <worldbody>
+        <geom type="plane" name="plane_geom" size="10 20 0.1"/>
+        <geom type="box" name="box_geom" size="10 20 30"/>
+        <geom type="sphere" name="sphere_geom" size="10 20 30"/>
+        <geom type="capsule" name="capsule_geom" size="10 20 30"/>
+        <geom type="cylinder" name="cylinder_geom" size="10 20 30"/>
+        <geom type="ellipsoid" name="ellipsoid_geom" size="10 20 30"/>
+      </worldbody>
+    </mujoco>
+  )";
+
+  pxr::SdfLayerRefPtr layer = LoadLayer(kXml);
+  auto stage = pxr::UsdStage::Open(layer);
+
+  for (const auto& prim : stage->TraverseAll()) {
+    ExpectAllAuthoredAttributesMatchSchemaTypes(prim);
+  }
 }
 
 TEST_F(MjcfSdfFileFormatPluginTest, TestGeomsPrims) {
@@ -1000,6 +1139,9 @@ TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsRigidBody) {
             <geom name="test_geom_2" type="sphere" size="1"/>
           </body>
         </body>
+        <body name="test_body_3" pos="0 0 0">
+          <geom name="test_geom_3" type="sphere" size="1"/>
+        </body>
       </worldbody>
     </mujoco>
   )";
@@ -1016,14 +1158,24 @@ TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsRigidBody) {
 
   EXPECT_PRIM_API_APPLIED(stage, "/physics_test/test_body",
                           pxr::UsdPhysicsRigidBodyAPI);
-  EXPECT_PRIM_API_APPLIED(stage, "/physics_test/test_body",
-                          pxr::UsdPhysicsArticulationRootAPI);
   EXPECT_PRIM_API_APPLIED(stage, "/physics_test/test_body/test_body_2",
                           pxr::UsdPhysicsRigidBodyAPI);
+  EXPECT_PRIM_API_APPLIED(stage, "/physics_test/test_body_3",
+                          pxr::UsdPhysicsRigidBodyAPI);
 
-  // Only the root body should have the articulation API applied.
+  // Articulation root is applied to the children of the world body.
+  EXPECT_PRIM_API_APPLIED(stage, "/physics_test/test_body",
+                          pxr::UsdPhysicsArticulationRootAPI);
+  // test_body_3 is a child of the world but has no children so should not be
+  // an articulation root.
+  EXPECT_PRIM_API_NOT_APPLIED(stage, "/physics_test/test_body_3",
+                          pxr::UsdPhysicsArticulationRootAPI);
+
+  // Articulation root is not applied to other bodies or world body.
+  EXPECT_PRIM_API_NOT_APPLIED(stage, "/physics_test",
+                          pxr::UsdPhysicsArticulationRootAPI);
   EXPECT_PRIM_API_NOT_APPLIED(stage, "/physics_test/test_body/test_body_2",
-                              pxr::UsdPhysicsArticulationRootAPI);
+                          pxr::UsdPhysicsArticulationRootAPI);
 
   // Geoms should not have RigidBodyAPI applied either.
   EXPECT_PRIM_API_NOT_APPLIED(stage, "/physics_test/test_body/test_geom",
@@ -1106,6 +1258,7 @@ TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsColliders) {
   EXPECT_PRIM_API_NOT_APPLIED(stage, "/test/ground",
                               pxr::UsdPhysicsRigidBodyAPI);
   EXPECT_PRIM_API_APPLIED(stage, "/test/ground", pxr::UsdPhysicsCollisionAPI);
+  EXPECT_PRIM_API_APPLIED(stage, "/test/ground", pxr::MjcPhysicsCollisionAPI);
 
   // body_0/body_0_0 [rigidbody] (Nested body - reparented)
   EXPECT_PRIM_VALID(stage, "/test/body_0/body_0_0");
@@ -1113,30 +1266,40 @@ TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsColliders) {
                           pxr::UsdPhysicsRigidBodyAPI);
   EXPECT_PRIM_API_NOT_APPLIED(stage, "/test/body_0/body_0_0",
                               pxr::UsdPhysicsCollisionAPI);
+  EXPECT_PRIM_API_NOT_APPLIED(stage, "/test/body_0/body_0_0",
+                              pxr::MjcPhysicsCollisionAPI);
   //   body_0/body_0_0/body_0_0_col [collider]
   EXPECT_PRIM_VALID(stage, "/test/body_0/body_0_0/body_0_0_col");
   EXPECT_PRIM_API_NOT_APPLIED(stage, "/test/body_0/body_0_0/body_0_0_col",
                               pxr::UsdPhysicsRigidBodyAPI);
   EXPECT_PRIM_API_APPLIED(stage, "/test/body_0/body_0_0/body_0_0_col",
                           pxr::UsdPhysicsCollisionAPI);
+  EXPECT_PRIM_API_APPLIED(stage, "/test/body_0/body_0_0/body_0_0_col",
+                          pxr::MjcPhysicsCollisionAPI);
 
   // body_1 [rigidbody]
   EXPECT_PRIM_VALID(stage, "/test/body_1");
   EXPECT_PRIM_API_APPLIED(stage, "/test/body_1", pxr::UsdPhysicsRigidBodyAPI);
   EXPECT_PRIM_API_NOT_APPLIED(stage, "/test/body_1",
                               pxr::UsdPhysicsCollisionAPI);
+  EXPECT_PRIM_API_NOT_APPLIED(stage, "/test/body_1",
+                              pxr::MjcPhysicsCollisionAPI);
   //   body_1/body_1_col_0 [collider]
   EXPECT_PRIM_VALID(stage, "/test/body_1/body_1_col_0");
   EXPECT_PRIM_API_NOT_APPLIED(stage, "/test/body_1/body_1_col_0",
                               pxr::UsdPhysicsRigidBodyAPI);
   EXPECT_PRIM_API_APPLIED(stage, "/test/body_1/body_1_col_0",
                           pxr::UsdPhysicsCollisionAPI);
+  EXPECT_PRIM_API_APPLIED(stage, "/test/body_1/body_1_col_0",
+                          pxr::MjcPhysicsCollisionAPI);
   //   body_1/body_1_col_1 [collider]
   EXPECT_PRIM_VALID(stage, "/test/body_1/body_1_col_1");
   EXPECT_PRIM_API_NOT_APPLIED(stage, "/test/body_1/body_1_col_1",
                               pxr::UsdPhysicsRigidBodyAPI);
   EXPECT_PRIM_API_APPLIED(stage, "/test/body_1/body_1_col_1",
                           pxr::UsdPhysicsCollisionAPI);
+  EXPECT_PRIM_API_APPLIED(stage, "/test/body_1/body_1_col_1",
+                          pxr::MjcPhysicsCollisionAPI);
 
   // body_2 [rigidbody]
   EXPECT_PRIM_VALID(stage, "/test/body_2");
@@ -1169,11 +1332,603 @@ TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsColliders) {
                           pxr::UsdPhysicsCollisionAPI);
   EXPECT_PRIM_API_APPLIED(stage, "/test/body_3/body_3_col/Mesh",
                           pxr::UsdPhysicsMeshCollisionAPI);
+  EXPECT_PRIM_API_APPLIED(stage, "/test/body_3/body_3_col/Mesh",
+                          pxr::MjcPhysicsMeshCollisionAPI);
   ExpectAttributeEqual(stage,
                        "/test/body_3/body_3_col/Mesh.physics:approximation",
                        pxr::UsdPhysicsTokens->convexHull);
 }
 
+TEST_F(MjcfSdfFileFormatPluginTest, TestMjcPhysicsCollisionAPI) {
+  static constexpr char xml[] = R"(
+  <mujoco model="test">
+    <worldbody>
+      <body name="body">
+        <geom name="box" type="box" size=".05 .05 .05" mass="0.1" shellinertia="true"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  auto stage = OpenStageWithPhysics(xml);
+
+  ExpectAttributeEqual(stage, "/test/body/box.mjc:shellinertia", true);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestMjcPhysicsMeshCollisionAPI) {
+  static constexpr char xml[] = R"(
+  <mujoco model="test">
+    <asset>
+      <mesh name="tet_legacy" inertia="legacy" vertex="0 0 0  1 0 0  0 1 0  0 0 1"/>
+      <mesh name="tet_exact" inertia="exact" vertex="0 0 0  1 0 0  0 1 0  0 0 1"/>
+      <mesh name="tet_convex" inertia="convex" vertex="0 0 0  1 0 0  0 1 0  0 0 1"/>
+      <mesh name="tet_shell" inertia="shell" vertex="0 0 0  1 0 0  0 1 0  0 0 1"/>
+    </asset>
+    <worldbody>
+      <body name="body">
+        <geom name="tet_legacy" type="mesh" mesh="tet_legacy"/>
+        <geom name="tet_exact" type="mesh" mesh="tet_exact"/>
+        <geom name="tet_convex" type="mesh" mesh="tet_convex"/>
+        <geom name="tet_shell" type="mesh" mesh="tet_shell"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  auto stage = OpenStageWithPhysics(xml);
+
+  ExpectAttributeEqual(stage, "/test/body/tet_legacy/Mesh.mjc:inertia",
+                       MjcPhysicsTokens->legacy);
+  ExpectAttributeEqual(stage, "/test/body/tet_exact/Mesh.mjc:inertia",
+                       MjcPhysicsTokens->exact);
+  ExpectAttributeEqual(stage, "/test/body/tet_convex/Mesh.mjc:inertia",
+                       MjcPhysicsTokens->convex);
+  ExpectAttributeEqual(stage, "/test/body/tet_shell/Mesh.mjc:inertia",
+                       MjcPhysicsTokens->shell);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestMassAPIApplied) {
+  static constexpr char xml[] = R"(
+  <mujoco model="test">
+    <worldbody>
+      <body name="body">
+        <geom name="box" type="box" size=".05 .05 .05" mass="0.1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  auto stage = OpenStageWithPhysics(xml);
+
+  EXPECT_PRIM_VALID(stage, "/test/body");
+  EXPECT_PRIM_VALID(stage, "/test/body/box");
+  EXPECT_PRIM_API_APPLIED(stage, "/test/body/box", pxr::UsdPhysicsMassAPI);
+  EXPECT_PRIM_API_NOT_APPLIED(stage, "/test/body", pxr::UsdPhysicsMassAPI);
+  ExpectAttributeEqual(stage, "/test/body/box.physics:mass", 0.1f);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestMassAPIAppliedToBody) {
+  static constexpr char xml[] = R"(
+  <mujoco model="test">
+    <worldbody>
+      <body name="body">
+        <inertial pos="1 2 3" mass="3" diaginertia="1 1 1"/>
+        <geom name="box" type="box" size=".05 .05 .05" mass="0.1"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  auto stage = OpenStageWithPhysics(xml);
+
+  EXPECT_PRIM_VALID(stage, "/test/body");
+  EXPECT_PRIM_VALID(stage, "/test/body/box");
+  EXPECT_PRIM_API_APPLIED(stage, "/test/body/box", pxr::UsdPhysicsMassAPI);
+  EXPECT_PRIM_API_APPLIED(stage, "/test/body", pxr::UsdPhysicsMassAPI);
+  // Make sure that body gets it's inertial elements from the inertial element
+  // and not from the subtree.
+  ExpectAttributeEqual(stage, "/test/body.physics:mass", 3.0f);
+  ExpectAttributeEqual(stage, "/test/body.physics:centerOfMass",
+                       pxr::GfVec3f(1, 2, 3));
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestMassAPIDensity) {
+  static constexpr char xml[] = R"(
+  <mujoco model="test">
+    <worldbody>
+      <body name="body">
+        <geom name="box" type="box" size=".05 .05 .05" density="1234"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  auto stage = OpenStageWithPhysics(xml);
+
+  ExpectAttributeEqual(stage, "/test/body/box.physics:density", 1234.0f);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestMjcPhysicsActuatorGeneral) {
+  static constexpr char xml[] = R"(
+  <mujoco model="test">
+    <worldbody>
+      <body name="body">
+        <geom name="box" type="box" size=".05 .05 .05" density="1234"/>
+        <site name="site"/>
+        <site name="ref"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <general
+        name="general"
+        site="site"
+        refsite="ref"
+        ctrllimited="true"
+        ctrlrange="0 1"
+        forcelimited="true"
+        forcerange="2 3"
+        actlimited="false"
+        actrange="4 5"
+        lengthrange="6 7"
+        actdim="1"
+        actearly="true"
+        dyntype="filter"
+        gaintype="user"
+        biastype="user"
+        gear="1 2 3 4 5 6"
+        dynprm="0 1 2 3 4 5 6 7 8 9"
+        gainprm="0 1 2 3 4 5 6 7 8 9"
+        biasprm="0 1 2 3 4 5 6 7 8 9"
+      />
+    </actuator>
+  </mujoco>
+  )";
+  auto stage = OpenStageWithPhysics(xml);
+
+  EXPECT_PRIM_API_APPLIED(stage, "/test/body/site", pxr::MjcPhysicsActuatorAPI);
+  EXPECT_REL_HAS_TARGET(stage, "/test/body/site.mjc:refSite", "/test/body/ref");
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:ctrlLimited",
+                       pxr::MjcPhysicsTokens->true_);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:ctrlRange:min", 0.0);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:ctrlRange:max", 1.0);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:forceLimited",
+                       pxr::MjcPhysicsTokens->true_);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:forceRange:min", 2.0);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:forceRange:max", 3.0);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:actLimited",
+                       pxr::MjcPhysicsTokens->false_);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:actRange:min", 4.0);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:actRange:max", 5.0);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:lengthRange:min", 6.0);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:lengthRange:max", 7.0);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:actDim", 1);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:dynType",
+                       MjcPhysicsTokens->filter);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:gainType",
+                       MjcPhysicsTokens->user);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:biasType",
+                       MjcPhysicsTokens->user);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:actEarly", true);
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:gear",
+                       pxr::VtDoubleArray{{1, 2, 3, 4, 5, 6}});
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:dynPrm",
+                       pxr::VtDoubleArray{{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}});
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:gainPrm",
+                       pxr::VtDoubleArray{{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}});
+  ExpectAttributeEqual(stage, "/test/body/site.mjc:biasPrm",
+                       pxr::VtDoubleArray{{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}});
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestMjcPhysicsJointActuator) {
+  static constexpr char xml[] = R"(
+  <mujoco model="test">
+    <worldbody>
+      <body name="axle">
+        <body name="rod">
+          <joint name="rod_hinge" type="hinge"/>
+          <geom name="box" type="box" size=".05 .05 .05" density="1234"/>
+        </body>
+      </body>
+    </worldbody>
+    <actuator>
+      <general
+        name="general"
+        joint="rod_hinge"
+      />
+    </actuator>
+  </mujoco>
+  )";
+  auto stage = OpenStageWithPhysics(xml);
+
+  EXPECT_PRIM_API_APPLIED(stage, "/test/axle/rod/rod_hinge",
+                          pxr::MjcPhysicsActuatorAPI);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestMjcPhysicsBodyActuator) {
+  static constexpr char xml[] = R"(
+  <mujoco model="test">
+    <worldbody>
+      <body name="body">
+        <geom name="box" type="box" size=".05 .05 .05" density="1234"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <general
+        name="general"
+        body="body"
+      />
+    </actuator>
+  </mujoco>
+  )";
+  auto stage = OpenStageWithPhysics(xml);
+
+  EXPECT_PRIM_API_APPLIED(stage, "/test/body", pxr::MjcPhysicsActuatorAPI);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestMjcPhysicsSliderCrankActuator) {
+  static constexpr char xml[] = R"(
+  <mujoco model="test">
+    <worldbody>
+      <body name="body">
+        <geom name="box" type="box" size=".05 .05 .05" density="1234"/>
+        <site name="crank"/>
+        <site name="slider"/>
+      </body>
+    </worldbody>
+    <actuator>
+      <general
+        name="general"
+        cranksite="crank"
+        slidersite="slider"
+        cranklength="1.23"
+      />
+    </actuator>
+  </mujoco>
+  )";
+  auto stage = OpenStageWithPhysics(xml);
+
+  EXPECT_PRIM_API_APPLIED(stage, "/test/body/crank",
+                          pxr::MjcPhysicsActuatorAPI);
+  EXPECT_REL_HAS_TARGET(stage, "/test/body/crank.mjc:sliderSite",
+                        "/test/body/slider");
+  ExpectAttributeEqual(stage, "/test/body/crank.mjc:crankLength", 1.23);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsFloatingAndFixedBaseBody) {
+  static constexpr char kXml[] = R"(
+    <mujoco model="test">
+      <worldbody>
+        <body name="fixed_base">
+          <geom type="sphere" size="1"/>
+        </body>
+        <body name="floating_base">
+          <joint type="free"/>
+          <geom type="sphere" size="1"/>
+        </body>
+      </worldbody>
+    </mujoco>
+  )";
+
+  auto stage = OpenStageWithPhysics(kXml);
+  EXPECT_THAT(stage, testing::NotNull());
+
+  // Test that the fixed_base body has a UsdPhysicsJoint child connected to the
+  // worldbody.
+  EXPECT_PRIM_VALID(stage, "/test/fixed_base/FixedJoint");
+  auto joint = pxr::UsdPhysicsFixedJoint::Get(
+      stage, SdfPath("/test/fixed_base/FixedJoint"));
+  ASSERT_TRUE(joint);
+
+  // Initial joint to the worldbody does't set a body0 rel.
+  EXPECT_REL_TARGET_COUNT(stage, "/test/fixed_base/FixedJoint.physics:body0",
+                          0);
+  EXPECT_REL_HAS_TARGET(stage, "/test/fixed_base/FixedJoint.physics:body1",
+                        "/test/fixed_base");
+
+  // Test that the floating_base body has no UsdPhysicsJoint children.
+  auto floating_base = stage->GetPrimAtPath(SdfPath("/test/floating_base"));
+  ASSERT_TRUE(floating_base);
+  for (const auto& child : floating_base.GetChildren()) {
+    EXPECT_FALSE(child.IsA<pxr::UsdPhysicsJoint>());
+  }
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsFixedJoint) {
+  static constexpr char kXml[] = R"(
+    <mujoco model="test">
+      <worldbody>
+        <body name="parent">
+          <geom type="sphere" size="1"/>
+          <body name="child" pos="1 0 0">
+            <geom type="sphere" size="1"/>
+            <body name="grandchild" pos="1 0 0">
+              <geom type="sphere" size="1"/>
+            </body>
+          </body>
+        </body>
+      </worldbody>
+    </mujoco>
+  )";
+
+  auto stage = OpenStageWithPhysics(kXml);
+  EXPECT_THAT(stage, testing::NotNull());
+
+  EXPECT_PRIM_IS_A(stage, "/test/parent/FixedJoint", pxr::UsdPhysicsFixedJoint);
+  // Initial joint to the worldbody does't set a body0 rel.
+  EXPECT_REL_TARGET_COUNT(stage, "/test/parent/FixedJoint.physics:body0", 0);
+  EXPECT_REL_HAS_TARGET(stage, "/test/parent/FixedJoint.physics:body1",
+                        "/test/parent");
+
+  EXPECT_PRIM_IS_A(stage, "/test/parent/child/FixedJoint",
+                   pxr::UsdPhysicsFixedJoint);
+  EXPECT_REL_HAS_TARGET(stage, "/test/parent/child/FixedJoint.physics:body0",
+                        "/test/parent");
+  EXPECT_REL_HAS_TARGET(stage, "/test/parent/child/FixedJoint.physics:body1",
+                        "/test/parent/child");
+
+  EXPECT_PRIM_IS_A(stage, "/test/parent/child/grandchild/FixedJoint",
+                   pxr::UsdPhysicsFixedJoint);
+  EXPECT_REL_HAS_TARGET(
+      stage, "/test/parent/child/grandchild/FixedJoint.physics:body0",
+      "/test/parent/child");
+  EXPECT_REL_HAS_TARGET(
+      stage, "/test/parent/child/grandchild/FixedJoint.physics:body1",
+      "/test/parent/child/grandchild");
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsRevoluteJoint) {
+  static constexpr char kXml[] = R"(
+    <mujoco model="test">
+      <worldbody>
+        <body name="parent">
+          <joint name="hinge_root"/>
+          <geom type="sphere" size="1"/>
+          <body name="child0" pos="1 0 0">
+            <joint name="hinge_normal" type="hinge" axis="0 0 1"/>
+            <geom type="sphere" size="1"/>
+          </body>
+          <body name="child1" pos="1 0 0">
+            <joint name="hinge_limited" type="hinge" axis="0 0 1" limited="true" range="-30 45"/>
+            <geom type="sphere" size="1"/>
+          </body>
+        </body>
+      </worldbody>
+    </mujoco>
+  )";
+
+  auto stage = OpenStageWithPhysics(kXml);
+  EXPECT_THAT(stage, testing::NotNull());
+
+  // hinge_root doesn't set a type so it's the default: a revolute joint.
+  EXPECT_PRIM_IS_A(stage, "/test/parent/hinge_root",
+                   pxr::UsdPhysicsRevoluteJoint);
+  // Initial joint to the worldbody does't set a body0 rel.
+  EXPECT_REL_TARGET_COUNT(stage, "/test/parent/hinge_root.physics:body0", 0);
+  EXPECT_REL_HAS_TARGET(stage, "/test/parent/hinge_root.physics:body1",
+                        "/test/parent");
+
+  EXPECT_PRIM_IS_A(stage, "/test/parent/child0/hinge_normal",
+                   pxr::UsdPhysicsRevoluteJoint);
+  EXPECT_REL_HAS_TARGET(stage, "/test/parent/child0/hinge_normal.physics:body0",
+                        "/test/parent");
+  EXPECT_REL_HAS_TARGET(stage, "/test/parent/child0/hinge_normal.physics:body1",
+                        "/test/parent/child0");
+  ExpectAttributeEqual(stage, "/test/parent/child0/hinge_normal.physics:axis",
+                       pxr::UsdPhysicsTokens->z);
+  EXPECT_ATTRIBUTE_HAS_NO_AUTHORED_VALUE(
+      stage, "/test/parent/child0/hinge_normal.physics:lowerLimit");
+  EXPECT_ATTRIBUTE_HAS_NO_AUTHORED_VALUE(
+      stage, "/test/parent/child0/hinge_normal.physics:upperLimit");
+
+  EXPECT_PRIM_IS_A(stage, "/test/parent/child1/hinge_limited",
+                   pxr::UsdPhysicsRevoluteJoint);
+  EXPECT_REL_HAS_TARGET(
+      stage, "/test/parent/child1/hinge_limited.physics:body0", "/test/parent");
+  EXPECT_REL_HAS_TARGET(stage,
+                        "/test/parent/child1/hinge_limited.physics:body1",
+                        "/test/parent/child1");
+  ExpectAttributeEqual(stage, "/test/parent/child1/hinge_limited.physics:axis",
+                       pxr::UsdPhysicsTokens->z);
+  ExpectAttributeEqual(
+      stage, "/test/parent/child1/hinge_limited.physics:lowerLimit", -30.0f);
+  ExpectAttributeEqual(
+      stage, "/test/parent/child1/hinge_limited.physics:upperLimit", 45.0f);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsPrismaticJoint) {
+  static constexpr char kXml[] = R"(
+    <mujoco model="test">
+      <worldbody>
+        <body name="parent">
+          <joint name="slide_root" type="slide"/>
+          <geom type="sphere" size="1"/>
+          <body name="child0" pos="1 0 0">
+            <joint name="slide_normal" type="slide" axis="1 0 0"/>
+            <geom type="sphere" size="1"/>
+          </body>
+          <body name="child1" pos="1 0 0">
+            <joint name="slide_limited" type="slide" axis="1 0 0" limited="true" range="-2.5 2.5"/>
+            <geom type="sphere" size="1"/>
+          </body>
+        </body>
+      </worldbody>
+    </mujoco>
+  )";
+
+  auto stage = OpenStageWithPhysics(kXml);
+  EXPECT_THAT(stage, testing::NotNull());
+
+  EXPECT_PRIM_IS_A(stage, "/test/parent/slide_root",
+                   pxr::UsdPhysicsPrismaticJoint);
+  // Initial joint to the worldbody does't set a body0 rel.
+  EXPECT_REL_TARGET_COUNT(stage, "/test/parent/slide_root.physics:body0", 0);
+  EXPECT_REL_HAS_TARGET(stage, "/test/parent/slide_root.physics:body1",
+                        "/test/parent");
+
+  EXPECT_PRIM_IS_A(stage, "/test/parent/child0/slide_normal",
+                   pxr::UsdPhysicsPrismaticJoint);
+  EXPECT_REL_HAS_TARGET(stage, "/test/parent/child0/slide_normal.physics:body0",
+                        "/test/parent");
+  EXPECT_REL_HAS_TARGET(stage, "/test/parent/child0/slide_normal.physics:body1",
+                        "/test/parent/child0");
+  ExpectAttributeEqual(stage, "/test/parent/child0/slide_normal.physics:axis",
+                       pxr::UsdPhysicsTokens->z);
+  EXPECT_ATTRIBUTE_HAS_NO_AUTHORED_VALUE(
+      stage, "/test/parent/child0/slide_normal.physics:lowerLimit");
+  EXPECT_ATTRIBUTE_HAS_NO_AUTHORED_VALUE(
+      stage, "/test/parent/child0/slide_normal.physics:upperLimit");
+
+  EXPECT_PRIM_IS_A(stage, "/test/parent/child1/slide_limited",
+                   pxr::UsdPhysicsPrismaticJoint);
+  EXPECT_REL_HAS_TARGET(
+      stage, "/test/parent/child1/slide_limited.physics:body0", "/test/parent");
+  EXPECT_REL_HAS_TARGET(stage,
+                        "/test/parent/child1/slide_limited.physics:body1",
+                        "/test/parent/child1");
+  ExpectAttributeEqual(stage, "/test/parent/child1/slide_limited.physics:axis",
+                       pxr::UsdPhysicsTokens->z);
+  ExpectAttributeEqual(
+      stage, "/test/parent/child1/slide_limited.physics:lowerLimit", -2.5f);
+  ExpectAttributeEqual(
+      stage, "/test/parent/child1/slide_limited.physics:upperLimit", 2.5f);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestRadianAnglesAreConvertedToDegrees) {
+  static constexpr char kXml[] = R"(
+    <mujoco model="test">
+      <compiler angle="radian"/>
+
+      <worldbody>
+        <body name="parent">
+          <joint name="hinge" type="hinge" axis="0 0 1" limited="true" range="-3.14159265359 0.78539816339"/>
+          <geom type="sphere" size="1"/>
+        </body>
+      </worldbody>
+    </mujoco>
+  )";
+
+  auto stage = OpenStageWithPhysics(kXml);
+  EXPECT_THAT(stage, testing::NotNull());
+
+  EXPECT_PRIM_VALID(stage, "/test/parent/hinge");
+  ExpectAttributeEqual(stage, "/test/parent/hinge.physics:lowerLimit", -180.0f);
+  ExpectAttributeEqual(stage, "/test/parent/hinge.physics:upperLimit", 45.0f);
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsJointFrames) {
+  static constexpr char kXml[] = R"(
+    <mujoco model="test">
+      <worldbody>
+        <body name="parent" pos="0 1 0">
+          <body name="child0" pos="1 0 0">
+            <joint name="hinge" type="hinge" pos="0.1 0.2 0.3" axis="0 1 0"/>
+            <geom type="sphere" size="0.1"/>
+          </body>
+          <body name="child1" pos="2 3 4">
+            <joint name="slide" type="slide" pos="0.4 0.5 0.6" axis="-1 0 0"/>
+            <geom type="sphere" size="0.1"/>
+          </body>
+          <body name="child2" pos="5 6 7">
+            <joint name="slide_nonaxis" type="slide" pos="0.7 0.8 0.9" axis="1 1 1"/>
+            <geom type="sphere" size="0.1"/>
+          </body>
+        </body>
+      </worldbody>
+    </mujoco>
+  )";
+
+  auto stage = OpenStageWithPhysics(kXml);
+  EXPECT_THAT(stage, testing::NotNull());
+
+  // Test the hinge joint.
+  EXPECT_PRIM_VALID(stage, "/test/parent/child0/hinge");
+  auto hinge_joint = pxr::UsdPhysicsRevoluteJoint::Get(
+      stage, SdfPath("/test/parent/child0/hinge"));
+  ASSERT_TRUE(hinge_joint);
+
+  ExpectAttributeEqual(stage, "/test/parent/child0/hinge.physics:localPos0",
+                       pxr::GfVec3f(1.1, 0.2, 0.3));
+
+  pxr::GfRotation hinge_rot;
+  hinge_rot.SetRotateInto({0, 0, 1}, {0, 1, 0});
+  pxr::GfQuatf expected_hinge_rot(hinge_rot.GetQuat());
+
+  pxr::GfQuatf hinge_local_rot0;
+  hinge_joint.GetLocalRot0Attr().Get(&hinge_local_rot0);
+  EXPECT_TRUE(AreQuatsSameRotation(expected_hinge_rot, hinge_local_rot0));
+
+  ExpectAttributeEqual(stage, "/test/parent/child0/hinge.physics:localPos1",
+                       pxr::GfVec3f(0.1, 0.2, 0.3));
+
+  pxr::GfQuatf hinge_local_rot1;
+  hinge_joint.GetLocalRot1Attr().Get(&hinge_local_rot1);
+  EXPECT_TRUE(AreQuatsSameRotation(expected_hinge_rot, hinge_local_rot1));
+
+  // Test the slide joint.
+  EXPECT_PRIM_VALID(stage, "/test/parent/child1/slide");
+  auto slide_joint = pxr::UsdPhysicsPrismaticJoint::Get(
+      stage, SdfPath("/test/parent/child1/slide"));
+  ASSERT_TRUE(slide_joint);
+
+  ExpectAttributeEqual(stage, "/test/parent/child1/slide.physics:localPos0",
+                       pxr::GfVec3f(2.4, 3.5, 4.6));
+
+  pxr::GfRotation slide_rot;
+  slide_rot.SetRotateInto({0, 0, 1}, {-1, 0, 0});
+  pxr::GfQuatf expected_slide_rot(slide_rot.GetQuat());
+
+  pxr::GfQuatf slide_local_rot0;
+  slide_joint.GetLocalRot0Attr().Get(&slide_local_rot0);
+  EXPECT_TRUE(AreQuatsSameRotation(expected_slide_rot, slide_local_rot0));
+
+  ExpectAttributeEqual(stage, "/test/parent/child1/slide.physics:localPos1",
+                       pxr::GfVec3f(0.4, 0.5, 0.6));
+
+  pxr::GfQuatf slide_local_rot1;
+  slide_joint.GetLocalRot1Attr().Get(&slide_local_rot1);
+  EXPECT_TRUE(AreQuatsSameRotation(expected_slide_rot, slide_local_rot1));
+
+  // Test the slide_nonaxis joint.
+  EXPECT_PRIM_VALID(stage, "/test/parent/child2/slide_nonaxis");
+  auto slide_nonaxis_joint = pxr::UsdPhysicsPrismaticJoint::Get(
+      stage, SdfPath("/test/parent/child2/slide_nonaxis"));
+  ASSERT_TRUE(slide_nonaxis_joint);
+
+  ExpectAttributeEqual(stage,
+                       "/test/parent/child2/slide_nonaxis.physics:localPos0",
+                       pxr::GfVec3f(5.7, 6.8, 7.9));
+
+  pxr::GfRotation slide_nonaxis_rot;
+  slide_nonaxis_rot.SetRotateInto({0, 0, 1}, {1, 1, 1});
+  pxr::GfQuatf expected_slide_nonaxis_rot(slide_nonaxis_rot.GetQuat());
+
+  pxr::GfQuatf slide_nonaxis_local_rot0;
+  slide_nonaxis_joint.GetLocalRot0Attr().Get(&slide_nonaxis_local_rot0);
+  EXPECT_TRUE(AreQuatsSameRotation(expected_slide_nonaxis_rot,
+                                   slide_nonaxis_local_rot0));
+
+  ExpectAttributeEqual(stage,
+                       "/test/parent/child2/slide_nonaxis.physics:localPos1",
+                       pxr::GfVec3f(0.7, 0.8, 0.9));
+
+  pxr::GfQuatf slide_nonaxis_local_rot1;
+  slide_nonaxis_joint.GetLocalRot1Attr().Get(&slide_nonaxis_local_rot1);
+  EXPECT_TRUE(AreQuatsSameRotation(expected_slide_nonaxis_rot,
+                                   slide_nonaxis_local_rot1));
+}
+
+TEST_F(MjcfSdfFileFormatPluginTest, TestPhysicsUnsupportedJoint) {
+  static constexpr char kXml[] = R"(
+    <mujoco model="test">
+      <worldbody>
+        <body name="parent">
+          <joint type="ball" name="ball_joint"/>
+          <geom type="sphere" size="1"/>
+        </body>
+      </worldbody>
+    </mujoco>
+  )";
+
+  auto stage = OpenStageWithPhysics(kXml);
+  EXPECT_THAT(stage, testing::NotNull());
+
+  EXPECT_PRIM_INVALID(stage, "/test/parent/ball_joint");
+}
 }  // namespace
 }  // namespace usd
 }  // namespace mujoco

@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>  // NOLINT(build/c++17)
 #include <functional>
 #include <mutex>
 #include <string>
@@ -653,7 +654,7 @@ mjCModel& mjCModel::operator-=(const mjCBody& subtree) {
 
 
 // add default tree to this model
-mjCModel_& mjCModel::operator+=(mjCDef& subtree) {
+mjCModel& mjCModel::operator+=(mjCDef& subtree) {
   defaults_.push_back(&subtree);
   def_map[subtree.name] = &subtree;
   subtree.model = this;
@@ -732,7 +733,6 @@ void deletefromlist(std::vector<T*>* list, mjsElement* element) {
   for (int j = 0; j < list->size(); ++j) {
     list->at(j)->id = -1;
     if (list->at(j) == element) {
-      list->at(j)->Release();
       list->erase(list->begin() + j);
       j--;
     }
@@ -741,15 +741,47 @@ void deletefromlist(std::vector<T*>* list, mjsElement* element) {
 
 
 
-// discard all invalid elements from all lists
-void mjCModel::DeleteElement(mjsElement* el) {
+// recursively delete all plugins in the subtree
+void mjCModel::DeleteSubtreePlugin(mjCBody* subtree) {
+  mjsPlugin* plugin = &(subtree->spec.plugin);
+  if (plugin->active && plugin->name->empty()) {
+    *this -= plugin->element;
+  }
+  for (auto* body : subtree->Bodies()) {
+    DeleteSubtreePlugin(body);
+  }
+}
+
+
+
+// remove the element from the model
+void mjCModel::operator-=(mjsElement* el) {
+  if (el->elemtype == mjOBJ_BODY) {
+    mjCBody* body = static_cast<mjCBody*>(el);
+    *this -= *body;
+  }
+
+  detached_.push_back(static_cast<mjCBase*>(el));
   ResetTreeLists();
+
+  if (el->elemtype != mjOBJ_DEFAULT) {
+    if (static_cast<mjCBase*>(el)->model != this) {
+      throw mjCError(nullptr, "element is not in this model");
+    }
+  } else {
+    if (static_cast<mjCDef*>(el)->model != this) {
+      throw mjCError(nullptr, "default is not in this model");
+    }
+  }
 
   switch (el->elemtype) {
     case mjOBJ_BODY:
+    {
       MakeTreeLists();  // rebuild lists that were reset at the beginning of the function
-      throw mjCError(nullptr, "bodies cannot be deleted, use detach instead");
+      mjCBody* subtree = static_cast<mjCBody*>(el);
+      DeleteSubtreePlugin(subtree);
       break;
+    }
 
     case mjOBJ_DEFAULT:
       MakeTreeLists();  // rebuild lists that were reset at the beginning of the function
@@ -759,8 +791,8 @@ void mjCModel::DeleteElement(mjsElement* el) {
     case mjOBJ_GEOM:
     {
       mjCGeom* geom = static_cast<mjCGeom*>(el);
-      if (geom->plugin.active && geom->plugin.name->empty() && geom->GetRef() == 1) {
-        DeleteElement(geom->plugin.element);
+      if (geom->plugin.active && geom->plugin.name->empty()) {
+        *this -= geom->plugin.element;
       }
       deletefromlist(&(geom->body->geoms), el);
       break;
@@ -785,8 +817,8 @@ void mjCModel::DeleteElement(mjsElement* el) {
     case mjOBJ_MESH:
     {
       mjCMesh* mesh = static_cast<mjCMesh*>(el);
-      if (mesh->plugin.active && mesh->plugin.name->empty() && mesh->GetRef() == 1) {
-        DeleteElement(mesh->plugin.element);
+      if (mesh->plugin.active && mesh->plugin.name->empty()) {
+        *this -= mesh->plugin.element;
       }
       deletefromlist(object_lists_[mjOBJ_MESH], el);
       break;
@@ -795,8 +827,8 @@ void mjCModel::DeleteElement(mjsElement* el) {
     case mjOBJ_ACTUATOR:
     {
       mjCActuator* actuator = static_cast<mjCActuator*>(el);
-      if (actuator->plugin.active && actuator->plugin.name->empty() && actuator->GetRef() == 1) {
-        DeleteElement(actuator->plugin.element);
+      if (actuator->plugin.active && actuator->plugin.name->empty()) {
+        *this -= actuator->plugin.element;
       }
       deletefromlist(object_lists_[mjOBJ_ACTUATOR], el);
       break;
@@ -805,8 +837,8 @@ void mjCModel::DeleteElement(mjsElement* el) {
     case mjOBJ_SENSOR:
     {
       mjCSensor* sensor = static_cast<mjCSensor*>(el);
-      if (sensor->plugin.active && sensor->plugin.name->empty() && sensor->GetRef() == 1) {
-        DeleteElement(sensor->plugin.element);
+      if (sensor->plugin.active && sensor->plugin.name->empty()) {
+        *this -= sensor->plugin.element;
       }
       deletefromlist(object_lists_[mjOBJ_SENSOR], el);
       break;
@@ -823,29 +855,6 @@ void mjCModel::DeleteElement(mjsElement* el) {
 
   // update signature after we updated everything
   spec.element->signature = Signature();
-}
-
-
-
-// recursively delete all plugins in the subtree
-void deletesubtreeplugin(mjCBody* subtree, mjCModel* model) {
-  mjsPlugin* plugin = &(subtree->spec.plugin);
-  if (plugin->active && plugin->name->empty()) {
-    model->DeleteElement(plugin->element);
-  }
-  for (auto* body : subtree->Bodies()) {
-    deletesubtreeplugin(body, model);
-  }
-}
-
-
-
-// deletes all plugins in the subtree and then the subtree itself
-void mjCModel::Detach(mjCBody* subtree) {
-  if (subtree->GetRef() == 1)  {
-    deletesubtreeplugin(subtree, this);
-  }
-  subtree->Release();
 }
 
 
@@ -939,6 +948,7 @@ mjCModel::~mjCModel() {
   for (int i=0; i < defaults_.size(); i++) delete defaults_[i];
   for (int i=0; i < specs_.size(); i++) mj_deleteSpec(specs_[i]);
   for (int i=0; i < plugins_.size(); i++) plugins_[i]->Release();
+  for (int i=0; i < detached_.size(); i++) detached_[i]->Release();
 
   // clear sizes and pointer lists created in Compile
   Clear();
@@ -1368,6 +1378,23 @@ static T* findobject(std::string_view name, const vector<T*>& list, const mjKeyM
   }
   return list[id->second];
 }
+
+
+
+mjCBase* mjCModel::FindTexture(std::string_view name) const {
+  for (unsigned int i=0; i < textures_.size(); i++) {
+    if (textures_[i]->name == name) {
+      return textures_[i];
+    }
+    if (textures_[i]->name.empty() &&
+        std::filesystem::path(textures_[i]->spec_file_).filename().stem() == name) {
+      return textures_[i];
+    }
+  }
+  return nullptr;
+}
+
+
 
 // find object in global lists given string type and name
 mjCBase* mjCModel::FindObject(mjtObj type, string name) const {
@@ -2670,6 +2697,7 @@ void mjCModel::CopyTree(mjModel* m) {
       m->light_mode[lid] = (int)pl->mode;
       m->light_targetbodyid[lid] = pl->targetbodyid;
       m->light_type[lid] = pl->type;
+      m->light_texid[lid] = pl->texid;
       m->light_castshadow[lid] = (mjtByte)pl->castshadow;
       m->light_active[lid] = (mjtByte)pl->active;
       mjuu_copyvec(m->light_pos+3*lid, pl->pos, 3);
@@ -3823,24 +3851,77 @@ void mjCModel::FuseReindex(mjCBody* body) {
 
 
 
+template <class T>
+void mjCModel::ReassignChild(std::vector<T*>& dest, std::vector<T*>& list,
+                             mjCBody* parent, mjCBody* body) {
+  for (int j=0; j < list.size(); j++) {
+    // assign
+    list[j]->body = parent;
+    dest.push_back(list[j]);
+
+    // change frame
+    changeframe(list[j]->pos, list[j]->quat, body->pos, body->quat);
+  }
+  list.clear();
+}
+
+
+
+template <class T>
+void mjCModel::ResolveReferences(std::vector<T*>& list, mjCBody* body) {
+  for (auto& item : list) {
+    item->CopyFromSpec();
+    item->ResolveReferences(this);
+  }
+}
+
+
+
+template <>
+void mjCModel::ResolveReferences(std::vector<mjCSensor*>& list, mjCBody* body) {
+  for (auto& item : list) {
+    item->CopyFromSpec();
+    item->ResolveReferences(this);
+  }
+  for (mjCSensor* sensor : list) {
+    if (sensor->objtype == mjOBJ_SITE &&
+        (sensor->type == mjSENS_FORCE || sensor->type == mjSENS_TORQUE) &&
+        static_cast<mjCSite*>(sensor->obj)->body == body) {
+      throw mjCError(sensor, "cannot fuse a body used by a force/torque sensor");
+    }
+  }
+}
+
+
+
 // fuse static bodies with their parent
 void mjCModel::FuseStatic(void) {
-  // skip if model has potential to reference elements with changed ids
-  if (!skins_.empty()        ||
-      !pairs_.empty()        ||
-      !excludes_.empty()     ||
-      !equalities_.empty()   ||
-      !tendons_.empty()      ||
-      !actuators_.empty()    ||
-      !sensors_.empty()      ||
-      !tuples_.empty()       ||
-      !cameras_.empty()      ||
-      !lights_.empty()) {
-    return;
-  }
-
-  // process fusable bodies
   for (int i=1; i < bodies_.size(); i++) {
+    // check if the body can be fused
+    if (!bodies_[i]->name.empty()) {
+      ids[mjOBJ_BODY].erase(bodies_[i]->name);
+
+      // try to resolve references without the name of this body, if it fails, skip
+      try {
+        ResolveReferences(cameras_);
+        ResolveReferences(lights_);
+        ResolveReferences(skins_);
+        ResolveReferences(pairs_);
+        ResolveReferences(excludes_);
+        ResolveReferences(equalities_);
+        ResolveReferences(tendons_);
+        ResolveReferences(actuators_);
+        ResolveReferences(sensors_, bodies_[i]);
+        ResolveReferences(tuples_);
+      } catch (mjCError err) {
+        ids[mjOBJ_BODY].insert({bodies_[i]->name, i});
+        continue;
+      }
+
+      // put body back the body name in the map
+      ids[mjOBJ_BODY].insert({bodies_[i]->name, i});
+    }
+
     // get body and parent
     mjCBody* body = bodies_[i];
     mjCBody* par = body->parent;
@@ -3851,78 +3932,8 @@ void mjCModel::FuseStatic(void) {
     }
 
     //------------- add mass and inertia (if parent not world)
-
     if (body->parent && body->parent->name != "world" && body->mass >= mjMINVAL) {
-      // body_ipose = body_pose * body_ipose
-      changeframe(body->ipos, body->iquat, body->pos, body->quat);
-
-      // organize data
-      double mass[2] = {
-        par->mass,
-        body->mass
-      };
-      double inertia[2][3] = {
-        {par->inertia[0], par->inertia[1], par->inertia[2]},
-        {body->inertia[0], body->inertia[1], body->inertia[2]}
-      };
-      double ipos[2][3] = {
-        {par->ipos[0], par->ipos[1], par->ipos[2]},
-        {body->ipos[0], body->ipos[1], body->ipos[2]}
-      };
-      double iquat[2][4] = {
-        {par->iquat[0], par->iquat[1], par->iquat[2], par->iquat[3]},
-        {body->iquat[0], body->iquat[1], body->iquat[2], body->iquat[3]}
-      };
-
-      // compute total mass
-      par->mass = 0;
-      mjuu_setvec(par->ipos, 0, 0, 0);
-      for (int j=0; j < 2; j++) {
-        par->mass += mass[j];
-        par->ipos[0] += mass[j]*ipos[j][0];
-        par->ipos[1] += mass[j]*ipos[j][1];
-        par->ipos[2] += mass[j]*ipos[j][2];
-      }
-
-      // small mass: allow for now, check for errors later
-      if (par->mass < mjMINVAL) {
-        par->mass = 0;
-        mjuu_setvec(par->inertia, 0, 0, 0);
-        mjuu_setvec(par->ipos, 0, 0, 0);
-        mjuu_setvec(par->iquat, 1, 0, 0, 0);
-      }
-
-      // proceed with regular computation
-      else {
-        // locipos = center-of-mass
-        par->ipos[0] /= par->mass;
-        par->ipos[1] /= par->mass;
-        par->ipos[2] /= par->mass;
-
-        // add inertias
-        double toti[6] = {0, 0, 0, 0, 0, 0};
-        for (int j=0; j < 2; j++) {
-          double inertA[6], inertB[6];
-          double dpos[3] = {
-            ipos[j][0] - par->ipos[0],
-            ipos[j][1] - par->ipos[1],
-            ipos[j][2] - par->ipos[2]
-          };
-
-          mjuu_globalinertia(inertA, inertia[j], iquat[j]);
-          mjuu_offcenter(inertB, mass[j], dpos);
-          for (int k=0; k < 6; k++) {
-            toti[k] += inertA[k] + inertB[k];
-          }
-        }
-
-        // compute principal axes of inertia
-        mjuu_copyvec(par->fullinertia, toti, 6);
-        const char* err1 = mjuu_fullInertia(par->iquat, par->inertia, par->fullinertia);
-        if (err1) {
-          throw mjCError(nullptr, "error '%s' in fusing static body inertias", err1);
-        }
-      }
+      par->AccumulateInertia(body);
     }
 
     //------------- replace body with its children in parent body list
@@ -3960,25 +3971,8 @@ void mjCModel::FuseStatic(void) {
 
     //------------- assign geoms and sites to parent, change frames
 
-    // geoms
-    for (int j=0; j < body->geoms.size(); j++) {
-      // assign
-      body->geoms[j]->body = par;
-      par->geoms.push_back(body->geoms[j]);
-
-      // change frame
-      changeframe(body->geoms[j]->pos, body->geoms[j]->quat, body->pos, body->quat);
-    }
-
-    // sites
-    for (int j=0; j < body->sites.size(); j++) {
-      // assign
-      body->sites[j]->body = par;
-      par->sites.push_back(body->sites[j]);
-
-      // change frame
-      changeframe(body->sites[j]->pos, body->sites[j]->quat, body->pos, body->quat);
-    }
+    ReassignChild(par->geoms, body->geoms, par, body);
+    ReassignChild(par->sites, body->sites, par, body);
 
     //------------- remove from global body list, reduce global counts
 
@@ -4029,15 +4023,21 @@ void mjCModel::FuseStatic(void) {
 
     //------------- delete body (without deleting children)
 
+    // remove body name from map
+    if (!body->name.empty()) {
+      ids[mjOBJ_BODY].erase(body->name);
+    }
+
     // delete allocation
     body->bodies.clear();
-    body->geoms.clear();
-    body->sites.clear();
     delete body;
 
     // check index i again (we have a new body at this index)
     i--;
   }
+
+  // remove empty names
+  processlist(ids, bodies_, mjOBJ_BODY, true);
 }
 
 
@@ -4461,6 +4461,17 @@ void mjCModel::TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs) {
     bodies_[i]->Compile();  // also compiles joints, geoms, sites, cameras, lights, frames
   }
 
+  // fuse static if enabled
+  if (compiler.fusestatic) {
+    FuseStatic();
+    for (int i=0; i < lights_.size(); i++) {
+      lights_[i]->Compile();
+    }
+    for (int i=0; i < cameras_.size(); i++) {
+      cameras_[i]->Compile();
+    }
+  }
+
   // compile all other objects except for keyframes
   for (auto flex : flexes_) flex->Compile(vfs);
   for (auto skin : skins_) skin->Compile(vfs);
@@ -4492,10 +4503,6 @@ void mjCModel::TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs) {
   // resolve asset references, compute sizes
   IndexAssets(compiler.discardvisual);
   SetSizes();
-  // fuse static if enabled
-  if (compiler.fusestatic) {
-    FuseStatic();
-  }
 
   // set nmocap and body.mocapid
   for (mjCBody* body : bodies_) {
@@ -4508,10 +4515,9 @@ void mjCModel::TryCompile(mjModel*& m, mjData*& d, const mjVFS* vfs) {
   }
 
   // check mass and inertia of moving bodies
-  if (bodies_.size() > 1) {
-    // we ignore the first body as it is the world body
-    if (!CheckBodiesMassInertia(std::vector<mjCBody*>(bodies_.begin()+1, bodies_.end()))) {
-      throw mjCError(0, "mass and inertia of moving bodies must be larger than mjMINVAL");
+  for (int i=1; i < bodies_.size(); i++) {
+    if (!bodies_[i]->joints.empty() && !CheckBodyMassInertia(bodies_[i])) {
+      throw mjCError(bodies_[i], "mass and inertia of moving bodies must be larger than mjMINVAL");
     }
   }
 
@@ -4756,20 +4762,6 @@ uint64_t mjCModel::Signature() {
 
 
 
-bool mjCModel::CheckBodiesMassInertia(std::vector<mjCBody*> bodies) {
-  // check mass and inertia of moving bodies
-  for (int i=0; i < bodies.size(); i++) {
-    if (!bodies[i]->joints.empty()) {
-      if (!CheckBodyMassInertia(bodies[i])) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
-
-
 bool mjCModel::CheckBodyMassInertia(mjCBody* body) {
   // check if body has valid mass and inertia
   if (body->mass >= mjMINVAL &&
@@ -4825,6 +4817,11 @@ bool mjCModel::CopyBack(const mjModel* m) {
       nemax != m->nemax || nconmax != m->nconmax || njmax != m->njmax ||
       npaths != m->npaths) {
     errInfo = mjCError(0, "incompatible models in CopyBack");
+    return false;
+  }
+
+  if (spec.element->signature != m->signature) {
+    errInfo = mjCError(0, "incompatible signatures in CopyBack");
     return false;
   }
 

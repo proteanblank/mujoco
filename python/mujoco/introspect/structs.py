@@ -279,6 +279,11 @@ STRUCTS: Mapping[str, StructDecl] = dict([
                  type=AnonymousStructDecl(
                      fields=(
                          StructFieldDecl(
+                             name='cameraid',
+                             type=ValueType(name='int'),
+                             doc='initial camera id (-1: free)',
+                         ),
+                         StructFieldDecl(
                              name='orthographic',
                              type=ValueType(name='int'),
                              doc='is the free camera orthographic (0: no, 1: yes)',  # pylint: disable=line-too-long
@@ -2225,6 +2230,14 @@ STRUCTS: Mapping[str, StructDecl] = dict([
                      inner_type=ValueType(name='int'),
                  ),
                  doc='spot, directional, etc. (mjtLightType)',
+                 array_extent=('nlight',),
+             ),
+             StructFieldDecl(
+                 name='light_texid',
+                 type=PointerType(
+                     inner_type=ValueType(name='int'),
+                 ),
+                 doc='texture id for image lights',
                  array_extent=('nlight',),
              ),
              StructFieldDecl(
@@ -6567,7 +6580,7 @@ STRUCTS: Mapping[str, StructDecl] = dict([
              StructFieldDecl(
                  name='dataid',
                  type=ValueType(name='int'),
-                 doc='mesh, hfield or plane id; -1: none',
+                 doc='mesh, hfield or plane id; -1: none; mesh: 2*id or 2*id+1 (hull)',  # pylint: disable=line-too-long
              ),
              StructFieldDecl(
                  name='objtype',
@@ -6701,6 +6714,11 @@ STRUCTS: Mapping[str, StructDecl] = dict([
                  name='type',
                  type=ValueType(name='int'),
                  doc='type (mjtLightType)',
+             ),
+             StructFieldDecl(
+                 name='texid',
+                 type=ValueType(name='int'),
+                 doc='texture id for image lights',
              ),
              StructFieldDecl(
                  name='attenuation',
@@ -8995,6 +9013,13 @@ STRUCTS: Mapping[str, StructDecl] = dict([
                  name='type',
                  type=ValueType(name='mjtLightType'),
                  doc='type of light',
+             ),
+             StructFieldDecl(
+                 name='texture',
+                 type=PointerType(
+                     inner_type=ValueType(name='mjString'),
+                 ),
+                 doc='texture name for image lights',
              ),
              StructFieldDecl(
                  name='castshadow',
