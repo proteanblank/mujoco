@@ -271,7 +271,7 @@ def _contact_groups(m: Model, d: Data) -> Dict[FunctionKey, Contact]:
       # pair contacts get their params from m.pair_* fields
       params.append((
           m.pair_margin[ip] - m.pair_gap[ip],
-          jp.clip(m.pair_friction[ip], a_min=eps),
+          m.pair_friction[ip],
           m.pair_solref[ip],
           m.pair_solreffriction[ip],
           m.pair_solimp[ip],
@@ -321,7 +321,7 @@ def _contact_groups(m: Model, d: Data) -> Dict[FunctionKey, Contact]:
         pos=None,
         frame=None,
         includemargin=includemargin,
-        friction=friction,
+        friction=jp.maximum(friction, mujoco.mjMINMU),
         solref=solref,
         solreffriction=solreffriction,
         solimp=solimp,
@@ -363,8 +363,12 @@ def make_condim(m: Union[Model, mujoco.MjModel]) -> np.ndarray:
 
   condim_counts = {}
   for k, v in group_counts.items():
-    func = _COLLISION_FUNC[k.types]
-    num_contacts = condim_counts.get(k.condim, 0) + func.ncon * v  # pytype: disable=attribute-error
+    if k.types[1] == mujoco.mjtGeom.mjGEOM_SDF:
+      ncon = m.opt.sdf_initpoints
+    else:
+      func = _COLLISION_FUNC[k.types]
+      ncon = func.ncon  # pytype: disable=attribute-error
+    num_contacts = condim_counts.get(k.condim, 0) + ncon * v
     if max_contact_points > -1:
       num_contacts = min(max_contact_points, num_contacts)
     condim_counts[k.condim] = num_contacts

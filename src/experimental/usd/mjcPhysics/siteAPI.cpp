@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "./siteAPI.h"
+#include <mujoco/experimental/usd/mjcPhysics/siteAPI.h>
 
-#include "pxr/usd/sdf/assetPath.h"
-#include "pxr/usd/sdf/types.h"
-#include "pxr/usd/usd/schemaRegistry.h"
-#include "pxr/usd/usd/typed.h"
+#include <pxr/usd/sdf/assetPath.h>
+#include <pxr/usd/sdf/types.h>
+#include <pxr/usd/usd/schemaRegistry.h>
+#include <pxr/usd/usd/typed.h>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -74,12 +74,36 @@ const TfType &MjcPhysicsSiteAPI::_GetTfType() const {
   return _GetStaticTfType();
 }
 
+UsdAttribute MjcPhysicsSiteAPI::GetGroupAttr() const {
+  return GetPrim().GetAttribute(MjcPhysicsTokens->mjcGroup);
+}
+
+UsdAttribute MjcPhysicsSiteAPI::CreateGroupAttr(VtValue const &defaultValue,
+                                                bool writeSparsely) const {
+  return UsdSchemaBase::_CreateAttr(
+      MjcPhysicsTokens->mjcGroup, SdfValueTypeNames->Int,
+      /* custom = */ false, SdfVariabilityUniform, defaultValue, writeSparsely);
+}
+
+namespace {
+static inline TfTokenVector _ConcatenateAttributeNames(
+    const TfTokenVector &left, const TfTokenVector &right) {
+  TfTokenVector result;
+  result.reserve(left.size() + right.size());
+  result.insert(result.end(), left.begin(), left.end());
+  result.insert(result.end(), right.begin(), right.end());
+  return result;
+}
+}  // namespace
+
 /*static*/
 const TfTokenVector &MjcPhysicsSiteAPI::GetSchemaAttributeNames(
     bool includeInherited) {
-  static TfTokenVector localNames;
-  static TfTokenVector allNames =
-      UsdAPISchemaBase::GetSchemaAttributeNames(true);
+  static TfTokenVector localNames = {
+      MjcPhysicsTokens->mjcGroup,
+  };
+  static TfTokenVector allNames = _ConcatenateAttributeNames(
+      UsdAPISchemaBase::GetSchemaAttributeNames(true), localNames);
 
   if (includeInherited)
     return allNames;
